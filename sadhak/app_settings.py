@@ -1,0 +1,15 @@
+from dotenv import load_dotenv
+import os
+
+# Load variables from .env file
+load_dotenv()
+
+# Access the variables
+database_url = os.getenv("DATABASE_URL")
+ACCESS_TOKEN_TTL_SECONDS = os.getenv('ACCESS_TOKEN_TTL_SECONDS')
+REFRESH_TOKEN_TTL_SECONDS = os.getenv("REFRESH_TOKEN_TTL_SECONDS")
+ACCESS_TOKEN_COOKIE = os.getenv("ACCESS_TOKEN_COOKIE")
+REFRESH_TOKEN_COOKIE = os.getenv("REFRESH_TOKEN_COOKIE")
+ACCOUNT_VERIFICATION_CODE = os.getenv("ACCOUNT_VERIFICATION_CODE")
+FORGOT_VERIFICATION_CODE = os.getenv("FR_PASSWORD_CODE")
+ACCOUNT_DELETION_CODE = os.getenv("ACCOUNT_VERIFICATION_CODE")
