@@ -2,6 +2,8 @@ import uuid
 from datetime import timedelta
 
 from django.db import models
+from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
+from django.contrib.auth.models import PermissionsMixin
 from django.utils import timezone
 
 
@@ -46,13 +48,47 @@ class OTPVerification(models.Model):
         self.save(update_fields=["is_used"])
 
 
-class User(models.Model):
-    """Custom User model with UUID primary key and bitmask roles."""
+class UserManager(BaseUserManager):
+    use_in_migrations = True
+
+    def create_user(self, username, email, password=None, **extra_fields):
+        if not username:
+            raise ValueError("Username is required")
+        if not email:
+            raise ValueError("Email is required")
+        username = username.strip()
+        email = self.normalize_email(email)
+        extra_fields.setdefault("is_active", True)
+        user = self.model(username=username, email=email, **extra_fields)
+        if password:
+            user.set_password(password)
+            user.is_password_set = True
+        else:
+            user.set_unusable_password()
+            user.is_password_set = False
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, username, email, password=None, **extra_fields):
+        extra_fields.setdefault("is_staff", True)
+        extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("is_active", True)
+        extra_fields.setdefault("is_email_verified", True)
+
+        if extra_fields.get("is_staff") is not True:
+            raise ValueError("Superuser must have is_staff=True.")
+        if extra_fields.get("is_superuser") is not True:
+            raise ValueError("Superuser must have is_superuser=True.")
+
+        return self.create_user(username, email, password, **extra_fields)
+
+
+class User(AbstractBaseUser, PermissionsMixin):
+    """Custom auth user compatible with Django auth/SimpleJWT token_blacklist."""
 
     user_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     username = models.CharField(max_length=30, unique=True)
     email = models.EmailField(max_length=255, unique=True)
-    password = models.CharField(max_length=128)
 
     first_name = models.CharField(max_length=255)
     last_name = models.CharField(max_length=255, null=True, blank=True)
@@ -70,7 +106,9 @@ class User(models.Model):
     ROLE_ADMIN = 2
 
     is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
     is_email_verified = models.BooleanField(default=False)
+    is_password_set = models.BooleanField(default=False)
     is_deleted = models.BooleanField(default=False)
 
     # Increment on logout/password reset to invalidate all active access JWTs.
@@ -78,6 +116,11 @@ class User(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = UserManager()
+
+    USERNAME_FIELD = "username"
+    REQUIRED_FIELDS = ["email", "first_name"]
 
     def add_role(self, role):
         self.roles |= role
@@ -100,42 +143,3 @@ class User(models.Model):
 
     def __str__(self):
         return self.username
-
-
-class UserAuthToken(models.Model):
-    """Stores only refresh tokens (hashed) for revocation/rotation."""
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    jti = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
-    user = models.ForeignKey("User", on_delete=models.CASCADE, related_name="refresh_tokens")
-    token_hash = models.CharField(max_length=64, unique=True)
-
-    expires_at = models.DateTimeField()
-    is_revoked = models.BooleanField(default=False)
-    revoked_at = models.DateTimeField(null=True, blank=True)
-
-    replaced_by = models.OneToOneField(
-        "self",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="replaces",
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["user", "is_revoked"]),
-            models.Index(fields=["expires_at"]),
-        ]
-
-    def is_expired(self):
-        return timezone.now() >= self.expires_at
-
-    def revoke(self):
-        if not self.is_revoked:
-            self.is_revoked = True
-            self.revoked_at = timezone.now()
-            self.save(update_fields=["is_revoked", "revoked_at", "updated_at"])

@@ -1,9 +1,7 @@
-import hashlib
 import secrets
-import uuid
-from datetime import datetime, timedelta, timezone as dt_timezone
-
-import jwt
+from datetime import timedelta
+import logging
+from django.core.cache import cache
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.cache import cache
@@ -14,20 +12,31 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+from user_management.emails import send_email,account_registration_template_html,password_reset_template_html
 
 from .authentication import TokenCookieAuthentication
-from sadhak.app_settings import (
-    ACCESS_TOKEN_COOKIE,
-    ACCESS_TOKEN_TTL_SECONDS,
-    ACCOUNT_VERIFICATION_CODE,
-    AR_EXPIRY,
-    FORGOT_VERIFICATION_CODE,
-    FP_EXPIRY,
-    REFRESH_TOKEN_COOKIE,
-    REFRESH_TOKEN_TTL_SECONDS,
+from .throttles import (
+    ForgotPasswordIdentifierRateThrottle,
+    LoginIdentifierRateThrottle,
+    RefreshRateThrottle,
+    UserOTPVerifyRateThrottle,
+    UserResetPasswordRateThrottle,
 )
+from sadhak.app_settings import (
+    access_token_cookie,
+    account_verification_code,
+    ar_expiry,
+    forgot_verification_code,
+    fp_expiry,
+    refresh_token_cookie,
+)
+from .models import OTPVerification, User
 
-from .models import OTPVerification, User, UserAuthToken
+
+logger = logging.getLogger(__name__)
 
 
 SCOPE_FULL_AUTH = "full_auth"
@@ -40,8 +49,10 @@ class HasRequiredScope(BasePermission):
         required_scope = getattr(view, "required_token_scope", None)
         if not required_scope:
             return True
-        payload = getattr(request, "auth", None) or {}
-        return payload.get("scope") == required_scope
+        token = getattr(request, "auth", None)
+        if token is None:
+            return False
+        return token.get("scope") == required_scope
 
 
 class AuthenticatedAPIView(APIView):
@@ -64,20 +75,81 @@ class RegistrationAPIView(APIView):
         gender = data.get("gender")
         age = data.get("age")
 
-        if not username or not email or not first_name or not password or not confirm_password:
+        if not username or not email or not first_name:# or not password or not confirm_password:
             return Response(
-                {"detail": "username, email, first_name, password and confirm_password are required"},
+                {"detail": "username, email, first_name are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if password != confirm_password:
-            return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
+        # if password != confirm_password:
+        #     return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if User.objects.filter(username=username).exists():
+        # if verified user with username exists
+        if User.objects.filter(username=username, is_email_verified=True).exists():
             return Response({"detail": "Username already exists"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if User.objects.filter(email=email).exists():
+        # existing verified user
+        existing_verified_by_email = User.objects.filter(email=email, is_email_verified=True).first()
+        if existing_verified_by_email:
+            # if password is not set
+            if not existing_verified_by_email.is_password_set:
+                access_token = _create_access_token(existing_verified_by_email, scope=SCOPE_EMAIL_VERIFY)
+                response = Response(
+                    {
+                        "detail": "Email already verified. Complete password setup.",
+                        "user_id": str(existing_verified_by_email.user_id),
+                    },
+                    status=status.HTTP_200_OK,
+                )
+                _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
+                return response
+            # if all set return email already exists
             return Response({"detail": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # check unverfied email exists
+        existing_unverified_by_email = User.objects.filter(
+            email=email,
+            is_email_verified=False,
+            is_deleted=False,
+        ).first()
+        if existing_unverified_by_email:
+            # check if a person try to register with username exists with same email
+            if (
+                User.objects.filter(username=username)
+                .exclude(user_id=existing_unverified_by_email.user_id)
+                .exists()
+            ):
+                return Response({"detail": "Username already exists"}, status=status.HTTP_400_BAD_REQUEST)
+
+            active_otp = _get_active_otp(existing_unverified_by_email, account_verification_code)
+            # if active otp not exists send email to verify
+            if not active_otp:
+                otp_value = _create_email_verification_otp(existing_unverified_by_email)
+                _send_otp_email(
+                    existing_unverified_by_email.email,
+                    existing_unverified_by_email.first_name or existing_unverified_by_email.username,
+                    otp_value,
+                    "Email verification OTP",
+                )
+
+            access_token = _create_access_token(existing_unverified_by_email, scope=SCOPE_EMAIL_VERIFY)
+            # if active otp exists
+            response = Response(
+                {
+                    "detail": "Verification OTP already sent. Continue email verification.",
+                    "user_id": str(existing_unverified_by_email.user_id),
+                },
+                status=status.HTTP_200_OK,
+            )
+            _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
+            return response
+        
+        if (
+            User.objects.filter(username=username, is_email_verified=False, is_deleted=False)
+            .exclude(email=email)
+            .exists()
+        ):
+            return Response({"detail": "Username already exists"}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             user = User.objects.create(
@@ -87,15 +159,17 @@ class RegistrationAPIView(APIView):
                 last_name=last_name or None,
                 gender=gender,
                 age=age,
-                password=make_password(password),
                 is_active=True,
                 is_email_verified=False,
+                is_password_set=False,
             )
+            user.set_unusable_password()
+            user.save(update_fields=["password"])
             user.add_role(User.ROLE_USER)
             otp_value = _create_email_verification_otp(user)
 
-        _send_otp_email(user.email, otp_value, "Email verification OTP")
-        access_token, _ = _create_access_token(user, scope=SCOPE_EMAIL_VERIFY)
+        _send_otp_email(user.email, user.first_name, otp_value, "Email verification OTP")
+        access_token = _create_access_token(user, scope=SCOPE_EMAIL_VERIFY)
 
         response = Response(
             {
@@ -104,31 +178,31 @@ class RegistrationAPIView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
-        _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=AR_EXPIRY)
+        _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
         return response
 
 
 class EmailVerificationAPIView(AuthenticatedAPIView):
     required_token_scope = SCOPE_EMAIL_VERIFY
+    throttle_classes = [UserOTPVerifyRateThrottle]
 
     def post(self, request):
         otp = (request.data.get("otp") or "").strip()
-
         if not otp:
             return Response({"detail": "otp is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         user = request.user
-
         otp_obj = (
-            OTPVerification.objects.filter(user=user, verification_type=ACCOUNT_VERIFICATION_CODE, is_used=False)
+            OTPVerification.objects.filter(user=user, verification_type=account_verification_code, is_used=False)
             .order_by("-created_at")
             .first()
         )
 
         if not otp_obj:
+            logger.warning("email_verification_no_active_otp user_id=%s", user.user_id)
             return Response({"detail": "No active OTP found"}, status=status.HTTP_400_BAD_REQUEST)
-
         if otp_obj.is_locked() or otp_obj.is_expired():
+            logger.warning("email_verification_otp_locked_or_expired user_id=%s", user.user_id)
             otp_obj.invalidate()
             return Response({"detail": "OTP expired or locked"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -139,6 +213,7 @@ class EmailVerificationAPIView(AuthenticatedAPIView):
                 otp_obj.is_used = True
                 fields.append("is_used")
             otp_obj.save(update_fields=fields)
+            logger.warning("email_verification_invalid_otp user_id=%s", user.user_id)
             return Response({"detail": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
@@ -149,12 +224,87 @@ class EmailVerificationAPIView(AuthenticatedAPIView):
             _blacklist_request_access_token(request)
 
         response = Response({"detail": "Email verified successfully"}, status=status.HTTP_200_OK)
+        logger.info("email_verification_success user_id=%s", user.user_id)
         _clear_auth_cookies(response)
         return response
 
 
+class SetupPasswordAPIView(AuthenticatedAPIView):
+    required_token_scope = SCOPE_EMAIL_VERIFY
+
+    def post(self, request):
+        new_password = request.data.get("new_password")
+        confirm_password = request.data.get("confirm_password")
+        if not new_password or not confirm_password:
+            return Response(
+                {"detail": "new_password and confirm_password are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if new_password != confirm_password:
+            return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        if not user.is_email_verified:
+            return Response({"detail": "Email verification required"}, status=status.HTTP_403_FORBIDDEN)
+
+        with transaction.atomic():
+            user.set_password(new_password)
+            user.is_password_set = True
+            user.token_version += 1
+            user.save(update_fields=["password", "is_password_set", "token_version", "updated_at"])
+            _blacklist_request_access_token(request)
+
+        access_token, refresh_token = _issue_token_pair(user)
+        response = Response({"detail": "Password setup successful"}, status=status.HTTP_200_OK)
+        _set_auth_cookies(response, access_token=access_token, refresh_token=refresh_token)
+        return response
+
+
+class ResendOTPAPIView(APIView):
+    authentication_classes = [TokenCookieAuthentication]
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserOTPVerifyRateThrottle]
+
+    def post(self, request):
+        user = request.user
+        token = getattr(request, "auth", None) or {}
+        scope = token.get("scope")
+
+        if scope == SCOPE_EMAIL_VERIFY:
+            if user.is_email_verified:
+                return Response({"detail": "Email is already verified"}, status=status.HTTP_200_OK)
+            verification_type = account_verification_code
+            subject = "Email verification OTP"
+            create_otp_fn = _create_email_verification_otp
+        elif scope == SCOPE_PASSWORD_RESET:
+            verification_type = forgot_verification_code
+            subject = "Password reset OTP"
+            create_otp_fn = _create_password_reset_otp
+        else:
+            return Response(
+                {"detail": "This token scope cannot resend OTP."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        active_otp = _get_active_otp(user, verification_type)
+        if active_otp:
+            return Response({"detail": "An active OTP already exists."}, status=status.HTTP_200_OK)
+
+        with transaction.atomic():
+            OTPVerification.objects.filter(
+                user=user,
+                verification_type=verification_type,
+                is_used=False,
+            ).update(is_used=True)
+            otp = create_otp_fn(user)
+
+        _send_otp_email(user.email, user.first_name or user.username, otp, subject)
+        return Response({"detail": "OTP resent successfully"}, status=status.HTTP_200_OK)
+
+
 class LoginAPIView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [LoginIdentifierRateThrottle]
 
     def post(self, request):
         identifier = (request.data.get("identifier") or "").strip().lower()
@@ -168,20 +318,26 @@ class LoginAPIView(APIView):
             user = User.objects.filter(username=identifier, is_deleted=False).first()
 
         if not user or not check_password(password, user.password):
+            logger.warning("login_failed_invalid_credentials identifier=%s", identifier)
             return Response({"detail": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
-
         if not user.is_active:
+            logger.warning("login_failed_inactive user_id=%s", user.user_id)
             return Response({"detail": "Account is inactive"}, status=status.HTTP_403_FORBIDDEN)
-
         if not user.is_email_verified:
+            logger.warning("login_failed_email_unverified user_id=%s", user.user_id)
             return Response({"detail": "Email is not verified"}, status=status.HTTP_403_FORBIDDEN)
+        if not user.is_password_set:
+            logger.warning("login_failed_password_not_set user_id=%s", user.user_id)
+            return Response(
+                {"detail": "Password not set. Complete account setup."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-        old_refresh = _extract_bearer_or_cookie_token(request, REFRESH_TOKEN_COOKIE, allow_header=False)
+        old_refresh = _extract_cookie_token(request, refresh_token_cookie)
         if old_refresh:
-            _revoke_refresh_token_by_raw(old_refresh)
+            _blacklist_refresh_token_by_raw(old_refresh)
 
         access_token, refresh_token = _issue_token_pair(user)
-
         response = Response(
             {
                 "detail": "Login successful",
@@ -195,11 +351,13 @@ class LoginAPIView(APIView):
             status=status.HTTP_200_OK,
         )
         _set_auth_cookies(response, access_token=access_token, refresh_token=refresh_token)
+        logger.info("login_success user_id=%s", user.user_id)
         return response
 
 
 class ForgotPasswordAPIView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ForgotPasswordIdentifierRateThrottle]
 
     def post(self, request):
         username = (request.data.get("username") or "").strip().lower()
@@ -208,25 +366,28 @@ class ForgotPasswordAPIView(APIView):
 
         user = User.objects.filter(username=username, is_deleted=False).first()
         if not user:
+            logger.info("forgot_password_requested_unknown_username username=%s", username)
             return Response(
                 {"detail": f"If the {username} exists, an OTP has been sent to registered Email Address"},
                 status=status.HTTP_200_OK,
             )
 
         otp = _create_password_reset_otp(user)
-        _send_otp_email(user.email, otp, "Password reset OTP")
+        _send_otp_email(user.email, user.username, otp, "Password reset OTP")
 
-        access_token, _ = _create_access_token(user, scope=SCOPE_PASSWORD_RESET)
+        access_token = _create_access_token(user, scope=SCOPE_PASSWORD_RESET)
         response = Response(
             {"detail": f"If the {username} exists, an OTP has been sent to registered Email Address"},
             status=status.HTTP_200_OK,
         )
-        _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=FP_EXPIRY)
+        _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=fp_expiry)
+        logger.info("forgot_password_otp_issued user_id=%s", user.user_id)
         return response
 
 
 class ResetPasswordAPIView(AuthenticatedAPIView):
     required_token_scope = SCOPE_PASSWORD_RESET
+    throttle_classes = [UserResetPasswordRateThrottle]
 
     def post(self, request):
         otp = (request.data.get("otp") or "").strip()
@@ -238,21 +399,21 @@ class ResetPasswordAPIView(AuthenticatedAPIView):
                 {"detail": "otp, new_password and confirm_password are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
         if new_password != confirm_password:
             return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
 
         user = request.user
-
         otp_obj = (
-            OTPVerification.objects.filter(user=user, verification_type=FORGOT_VERIFICATION_CODE, is_used=False)
+            OTPVerification.objects.filter(user=user, verification_type=forgot_verification_code, is_used=False)
             .order_by("-created_at")
             .first()
         )
-        if not otp_obj:
-            return Response({"detail": "No active OTP found"}, status=status.HTTP_400_BAD_REQUEST)
 
+        if not otp_obj:
+            logger.warning("reset_password_no_active_otp user_id=%s", user.user_id)
+            return Response({"detail": "No active OTP found"}, status=status.HTTP_400_BAD_REQUEST)
         if otp_obj.is_locked() or otp_obj.is_expired():
+            logger.warning("reset_password_otp_locked_or_expired user_id=%s", user.user_id)
             otp_obj.invalidate()
             return Response({"detail": "OTP expired or locked"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -263,18 +424,21 @@ class ResetPasswordAPIView(AuthenticatedAPIView):
                 otp_obj.is_used = True
                 fields.append("is_used")
             otp_obj.save(update_fields=fields)
+            logger.warning("reset_password_invalid_otp user_id=%s", user.user_id)
             return Response({"detail": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
-            user.password = make_password(new_password)
+            user.set_password(new_password)
+            user.is_password_set = True
             user.token_version += 1
-            user.save(update_fields=["password", "token_version", "updated_at"])
+            user.save(update_fields=["password", "is_password_set", "token_version", "updated_at"])
             otp_obj.is_used = True
             otp_obj.save(update_fields=["is_used"])
-            _revoke_all_user_refresh_tokens(user)
+            _blacklist_refresh_token_by_raw(_extract_cookie_token(request, refresh_token_cookie))
             _blacklist_request_access_token(request)
 
         response = Response({"detail": "Password reset successful"}, status=status.HTTP_200_OK)
+        logger.info("reset_password_success user_id=%s", user.user_id)
         _clear_auth_cookies(response)
         return response
 
@@ -290,22 +454,24 @@ class PasswordChangeAPIView(AuthenticatedAPIView):
                 {"detail": "old_password, new_password and confirm_password are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
         if new_password != confirm_password:
             return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
 
         user = request.user
         if not check_password(old_password, user.password):
+            logger.warning("password_change_failed_old_password user_id=%s", user.user_id)
             return Response({"detail": "Old password is incorrect"}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
-            user.password = make_password(new_password)
+            user.set_password(new_password)
+            user.is_password_set = True
             user.token_version += 1
-            user.save(update_fields=["password", "token_version", "updated_at"])
-            _revoke_all_user_refresh_tokens(user)
+            user.save(update_fields=["password", "is_password_set", "token_version", "updated_at"])
+            _blacklist_refresh_token_by_raw(_extract_cookie_token(request, refresh_token_cookie))
             _blacklist_request_access_token(request)
 
         response = Response({"detail": "Password changed successfully"}, status=status.HTTP_200_OK)
+        logger.info("password_change_success user_id=%s", user.user_id)
         _clear_auth_cookies(response)
         return response
 
@@ -370,21 +536,22 @@ class LogoutAPIView(AuthenticatedAPIView):
             user = User.objects.select_for_update().get(user_id=request.user.user_id)
             user.token_version += 1
             user.save(update_fields=["token_version", "updated_at"])
-            _revoke_all_user_refresh_tokens(user)
+            _blacklist_refresh_token_by_raw(_extract_cookie_token(request, refresh_token_cookie))
             _blacklist_request_access_token(request)
 
         response = Response({"detail": "Logout successful"}, status=status.HTTP_200_OK)
+        logger.info("logout_success user_id=%s", request.user.user_id)
         _clear_auth_cookies(response)
         return response
 
 
 class CreateRefreshTokenAPIView(AuthenticatedAPIView):
     def post(self, request):
-        old_refresh = _extract_bearer_or_cookie_token(request, REFRESH_TOKEN_COOKIE, allow_header=False)
+        old_refresh = _extract_cookie_token(request, refresh_token_cookie)
         if old_refresh:
-            _revoke_refresh_token_by_raw(old_refresh)
+            _blacklist_refresh_token_by_raw(old_refresh)
 
-        refresh_token, _ = _create_refresh_token(request.user)
+        refresh_token = _create_refresh_token(request.user)
         response = Response({"detail": "Refresh token created"}, status=status.HTTP_201_CREATED)
         _set_auth_cookies(response, refresh_token=refresh_token)
         return response
@@ -392,47 +559,53 @@ class CreateRefreshTokenAPIView(AuthenticatedAPIView):
 
 class RefreshAccessTokenAPIView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [RefreshRateThrottle]
 
     def post(self, request):
-        refresh_raw = _extract_bearer_or_cookie_token(request, REFRESH_TOKEN_COOKIE, allow_header=False)
+        refresh_raw = _extract_cookie_token(request, refresh_token_cookie)
         if not refresh_raw:
+            logger.warning("refresh_access_failed_missing_refresh_cookie")
             response = Response({"detail": "Refresh token is required"}, status=status.HTTP_401_UNAUTHORIZED)
             _clear_auth_cookies(response)
             return response
 
         try:
-            user, refresh_obj, _ = _validate_refresh_token(refresh_raw)
+            user, refresh_token = _validate_refresh_token(refresh_raw)
         except AuthenticationFailed as exc:
+            logger.warning("refresh_access_failed_invalid_refresh reason=%s", str(exc))
             response = Response({"detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
             _clear_auth_cookies(response)
             return response
 
-        access_token, _ = _create_access_token(user, scope=SCOPE_FULL_AUTH)
-        refresh_token = _rotate_refresh_token(refresh_obj, user)
+        access_token = _create_access_token(user, scope=SCOPE_FULL_AUTH)
+        refresh_token = _rotate_refresh_token(refresh_raw, refresh_token, user)
 
         response = Response({"detail": "Access token refreshed"}, status=status.HTTP_200_OK)
         _set_auth_cookies(response, access_token=access_token, refresh_token=refresh_token)
+        logger.info("refresh_access_success user_id=%s", user.user_id)
         return response
 
 
 def _create_email_verification_otp(user):
     otp = _generate_otp()
+    expiry_minutes = int(ar_expiry)
     OTPVerification.objects.create(
         user=user,
         otp_hash=make_password(otp),
-        verification_type=ACCOUNT_VERIFICATION_CODE,
-        expires_at=timezone.now() + timedelta(minutes=AR_EXPIRY),
+        verification_type=account_verification_code,
+        expires_at=timezone.now() + timedelta(minutes=expiry_minutes),
     )
     return otp
 
 
 def _create_password_reset_otp(user):
     otp = _generate_otp()
+    expiry_minutes = int(fp_expiry)
     OTPVerification.objects.create(
         user=user,
         otp_hash=make_password(otp),
-        verification_type=FORGOT_VERIFICATION_CODE,
-        expires_at=timezone.now() + timedelta(minutes=FP_EXPIRY),
+        verification_type=forgot_verification_code,
+        expires_at=timezone.now() + timedelta(minutes=expiry_minutes),
     )
     return otp
 
@@ -441,167 +614,163 @@ def _generate_otp():
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-def _send_otp_email(email, otp, subject):
-    print(f"[{subject}] {email} -> {otp}")
+def _get_active_otp(user, verification_type):
+    otp = (
+        OTPVerification.objects.filter(
+            user=user,
+            verification_type=verification_type,
+            is_used=False,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if not otp:
+        return None
+    if otp.is_expired() or otp.is_locked():
+        otp.invalidate()
+        return None
+    return otp
 
 
-def _jwt_secret():
-    return getattr(settings, "JWT_SECRET_KEY", settings.SECRET_KEY)
+def _send_otp_email(email, username, otp, subject):
+    body = ""
+    if subject == "Email verification OTP":
+        body = account_registration_template_html(username, otp)
+    elif subject == "Password reset OTP":
+        body = password_reset_template_html(username, otp)
+    send_email(subject,account_registration_template_html(username, otp),email,'html')
 
 
-def _jwt_algorithm():
-    return getattr(settings, "JWT_ALGORITHM", "HS256")
+def _access_lifetime_seconds():
+    simple_jwt = getattr(settings, "SIMPLE_JWT", {})
+    lifetime = simple_jwt.get("ACCESS_TOKEN_LIFETIME")
+    if lifetime is not None:
+        return int(lifetime.total_seconds())
+    return 15 * 60
 
 
-def _token_digest(raw_token):
-    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+def _refresh_lifetime_seconds():
+    simple_jwt = getattr(settings, "SIMPLE_JWT", {})
+    lifetime = simple_jwt.get("REFRESH_TOKEN_LIFETIME")
+    if lifetime is not None:
+        return int(lifetime.total_seconds())
+    return 7 * 24 * 60 * 60
 
 
-def _extract_bearer_or_cookie_token(request, cookie_name, allow_header=True):
-    if allow_header:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.lower().startswith("bearer "):
-            return auth_header.split(" ", 1)[1].strip()
-    return request.COOKIES.get(cookie_name)
+def _create_access_token(user, scope=SCOPE_FULL_AUTH,expiry=None):
+    key = f"{user.user_id}:{scope}"
+    cached = cache.get(key)
+    if cached:
+        return cached
+    token = AccessToken.for_user(user)
+    token["token_version"] = user.token_version
+    token["scope"] = scope
+    cache.set(key, str(token), timeout=expiry)
+    return str(token)
 
 
-def _encode_jwt(user, token_type, ttl_seconds, scope=SCOPE_FULL_AUTH):
-    now = int(timezone.now().timestamp())
-    payload = {
-        "sub": str(user.user_id),
-        "jti": str(uuid.uuid4()),
-        "token_type": token_type,
-        "scope": scope,
-        "token_version": user.token_version,
-        "iat": now,
-        "exp": now + int(ttl_seconds),
-    }
-    token = jwt.encode(payload, _jwt_secret(), algorithm=_jwt_algorithm())
-    return token, payload
+def _create_refresh_token(user):
+    refresh = RefreshToken.for_user(user)
+    refresh["token_version"] = user.token_version
+    refresh["scope"] = SCOPE_FULL_AUTH
+    return str(refresh)
 
 
-def _decode_jwt_token(raw_token, expected_type):
-    try:
-        payload = jwt.decode(raw_token, _jwt_secret(), algorithms=[_jwt_algorithm()])
-    except jwt.ExpiredSignatureError:
-        raise AuthenticationFailed("Token expired")
-    except jwt.InvalidTokenError:
-        raise AuthenticationFailed("Invalid token")
-
-    if payload.get("token_type") != expected_type:
-        raise AuthenticationFailed("Invalid token type")
-    if "sub" not in payload or "jti" not in payload or "token_version" not in payload or "scope" not in payload:
-        raise AuthenticationFailed("Malformed token")
-    if expected_type == "access" and _is_access_jti_blocklisted(payload["jti"]):
-        raise AuthenticationFailed("Access token revoked")
-
-    return payload
+def _issue_token_pair(user):
+    refresh_raw = _create_refresh_token(user)
+    refresh = RefreshToken(refresh_raw)
+    access = refresh.access_token
+    access["token_version"] = user.token_version
+    access["scope"] = SCOPE_FULL_AUTH
+    return str(access), refresh_raw
 
 
-def _get_user_for_payload(payload):
-    user = User.objects.filter(user_id=payload["sub"], is_deleted=False).first()
+def _lookup_user_from_refresh_token(refresh_token):
+    simple_jwt = getattr(settings, "SIMPLE_JWT", {})
+    claim_name = simple_jwt.get("USER_ID_CLAIM", "user_id")
+    lookup_field = str(simple_jwt.get("USER_ID_FIELD", "id")).lower()
+    claim_value = refresh_token.get(claim_name)
+
+    if claim_value is None:
+        raise AuthenticationFailed("Malformed refresh token")
+
+    filters = {lookup_field: claim_value, "is_deleted": False}
+    user = User.objects.filter(**filters).first()
     if not user:
         raise AuthenticationFailed("User not found")
     if not user.is_active:
         raise AuthenticationFailed("User account is inactive")
-    if int(payload["token_version"]) != user.token_version:
-        raise AuthenticationFailed("Session invalidated")
     return user
 
 
-def _create_access_token(user, scope=SCOPE_FULL_AUTH):
-    return _encode_jwt(user, "access", ACCESS_TOKEN_TTL_SECONDS, scope=scope)
-
-
-def _create_refresh_token(user):
-    refresh_token, payload = _encode_jwt(user, "refresh", REFRESH_TOKEN_TTL_SECONDS, scope=SCOPE_FULL_AUTH)
-    expires_at = datetime.fromtimestamp(payload["exp"], tz=dt_timezone.utc)
-    refresh_obj = UserAuthToken.objects.create(
-        user=user,
-        jti=payload["jti"],
-        token_hash=_token_digest(refresh_token),
-        expires_at=expires_at,
-    )
-    return refresh_token, refresh_obj
-
-
-def _issue_token_pair(user):
-    access_token, _ = _create_access_token(user, scope=SCOPE_FULL_AUTH)
-    refresh_token, _ = _create_refresh_token(user)
-    return access_token, refresh_token
-
-
 def _validate_refresh_token(raw_token):
-    payload = _decode_jwt_token(raw_token, expected_type="refresh")
-    user = _get_user_for_payload(payload)
-
-    refresh_obj = UserAuthToken.objects.filter(
-        user=user,
-        token_hash=_token_digest(raw_token),
-    ).first()
-    if not refresh_obj:
-        raise AuthenticationFailed("Refresh token not recognized")
-    if refresh_obj.is_revoked:
+    try:
+        refresh_token = RefreshToken(raw_token)
+    except TokenError:
+        raise AuthenticationFailed("Invalid or expired refresh token")
+    if BlacklistedToken.objects.filter(token__jti=refresh_token.get("jti")).exists():
         raise AuthenticationFailed("Refresh token revoked")
-    if refresh_obj.is_expired():
-        refresh_obj.revoke()
-        raise AuthenticationFailed("Refresh token expired")
 
-    return user, refresh_obj, payload
+    user = _lookup_user_from_refresh_token(refresh_token)
+    if int(refresh_token.get("token_version", -1)) != user.token_version:
+        raise AuthenticationFailed("Session invalidated")
 
-
-def _rotate_refresh_token(old_obj, user):
-    new_token, new_obj = _create_refresh_token(user)
-    old_obj.replaced_by = new_obj
-    old_obj.revoke()
-    old_obj.save(update_fields=["replaced_by", "updated_at"])
-    return new_token
+    return user, refresh_token
 
 
-def _revoke_refresh_token_by_raw(raw_token):
+def _rotate_refresh_token(old_raw, old_refresh_token, user):
+    new_raw = _create_refresh_token(user)
+    _blacklist_refresh_token_instance(old_refresh_token)
+    _blacklist_refresh_token_by_raw(old_raw)
+    return new_raw
+
+
+def _blacklist_refresh_token_instance(refresh_token):
+    if not refresh_token:
+        return
+    try:
+        refresh_token.blacklist()
+    except Exception:
+        # If already blacklisted or token cannot be blacklisted, ignore here.
+        pass
+
+
+def _blacklist_refresh_token_by_raw(raw_token):
     if not raw_token:
         return
-    token_obj = UserAuthToken.objects.filter(token_hash=_token_digest(raw_token)).first()
-    if token_obj:
-        token_obj.revoke()
-
-
-def _revoke_all_user_refresh_tokens(user):
-    now = timezone.now()
-    UserAuthToken.objects.filter(user=user, is_revoked=False).update(
-        is_revoked=True,
-        revoked_at=now,
-        updated_at=now,
-    )
-
-
-def _blacklist_cache_key_for_jti(jti):
-    return f"access_blacklist:{jti}"
+    try:
+        refresh_token = RefreshToken(raw_token)
+    except TokenError:
+        return
+    _blacklist_refresh_token_instance(refresh_token)
 
 
 def _blacklist_access_jti(jti, exp_ts):
     ttl = int(exp_ts - timezone.now().timestamp())
     if ttl > 0:
-        cache.set(_blacklist_cache_key_for_jti(jti), 1, timeout=ttl)
-
-
-def _is_access_jti_blocklisted(jti):
-    return bool(cache.get(_blacklist_cache_key_for_jti(jti)))
+        cache.set(f"access_blacklist:{jti}", 1, timeout=ttl)
 
 
 def _blacklist_request_access_token(request):
-    payload = getattr(request, "auth", None) or {}
-    jti = payload.get("jti")
-    exp = payload.get("exp")
+    token = getattr(request, "auth", None)
+    if token is None:
+        return
+    jti = token.get("jti")
+    exp = token.get("exp")
     if jti and exp:
         _blacklist_access_jti(jti, exp)
 
 
-def _set_auth_cookies(response, access_token=None, refresh_token=None, access_token_expiry=ACCESS_TOKEN_TTL_SECONDS):
+def _extract_cookie_token(request, cookie_name):
+    return request.COOKIES.get(cookie_name)
+
+
+def _set_auth_cookies(response, access_token=None, refresh_token=None, access_token_expiry=None):
     if access_token:
-        _set_cookie(response, ACCESS_TOKEN_COOKIE, access_token, access_token_expiry)
+        max_age = int(access_token_expiry) if access_token_expiry is not None else _access_lifetime_seconds()
+        _set_cookie(response, access_token_cookie, access_token, max_age)
     if refresh_token:
-        _set_cookie(response, REFRESH_TOKEN_COOKIE, refresh_token, REFRESH_TOKEN_TTL_SECONDS)
+        _set_cookie(response, refresh_token_cookie, refresh_token, _refresh_lifetime_seconds())
 
 
 def _set_cookie(response, key, token, max_age):
@@ -617,5 +786,5 @@ def _set_cookie(response, key, token, max_age):
 
 
 def _clear_auth_cookies(response):
-    response.delete_cookie(ACCESS_TOKEN_COOKIE, path="/")
-    response.delete_cookie(REFRESH_TOKEN_COOKIE, path="/")
+    response.delete_cookie(access_token_cookie, path="/")
+    response.delete_cookie(refresh_token_cookie, path="/")

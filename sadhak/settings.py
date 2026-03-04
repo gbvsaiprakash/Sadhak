@@ -14,7 +14,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 import os
-
+import sys
 # Load variables from .env file
 load_dotenv()
 
@@ -26,12 +26,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-aj0q+5_lgq)3g4a%!nb_-7ujgrg7!t=$5%bx3ck=0pkoy=u)lk'
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False if os.environ.get("DEBUG",True) in ["False",False] else True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -43,13 +43,19 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    "drf_yasg", # Swagger/docs generation for DRF
     'rest_framework',
+    'rest_framework.authtoken', # Enables API views, serializers and token auth
+    'rest_framework_simplejwt.token_blacklist', # Simple JWT token blacklist app (for revoking refresh tokens)
+    'corsheaders', # needed if frontend is on other origin
     'user_management',
+
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware', # should be before CommomMiddleware so headers are added before response processing
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -57,6 +63,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+SESSION_ENGINE = 'django.contrib.sessions.backends.db' # store session in db by default to handle persistent server-side sessions
 ROOT_URLCONF = 'sadhak.urls'
 
 TEMPLATES = [
@@ -91,13 +98,20 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": "sadhak_db",
-        "USER": "sadhak",
-        "PASSWORD": "U2lkZGhhQDYyMDI",
+        "USER": os.getenv("DATABASE_USER"),
+        "PASSWORD": os.getenv("DATABASE_PASSWORD"),
         "HOST": "127.0.0.1",
         "PORT": "5432",
     }
 }
 
+if "test" in sys.argv:
+    DATABASES["default"] = {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "test_db.sqlite3",
+    }
+
+AUTH_USER_MODEL = "user_management.User"
 
 
 # Password validation
@@ -119,8 +133,14 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 REST_FRAMEWORK = {
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 10,
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "user_management.authentication.TokenCookieAuthentication",
+        # 'rest_framework.authentication.TokenAuthentication',
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # 'rest_framework.authentication.BasicAuthentication',
+
     ),
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
@@ -153,8 +173,54 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
+
+
+
+# CORS_ALLOW_HEADERS = list(default_headers) + [
+#     'cache-control',
+#     'user_metadata',
+#     'ngrok-skip-browser-warning',
+#     'CustomAuthToken',
+#     'sec-ch-ua',
+#     'sec-ch-ua-mobile',
+#     'sec-ch-ua-platform',
+#     'expires',
+#     'pragma',
+#     "x-use-cache",
+#     "x-use-cache-timeout",
+    
+# ]
+CORS_EXPOSE_HEADERS = [
+    'Authorization',
+    "user_metadata"
+]
+CORS_ALLOW_METHODS = [
+    'GET',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+    'OPTIONS'
+]
+
+
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "ACCESS_TOKEN_LIFETIME": timedelta(seconds=int(os.getenv("ACCESS_TOKEN_TTL_SECONDS"))),
+    "REFRESH_TOKEN_LIFETIME": timedelta(seconds=int(os.getenv("REFRESH_TOKEN_TTL_SECONDS"))),
+    "SIGNING_KEY": os.getenv("JWT_SECRET", "your_default_secret"),
+    "USER_ID_FIELD": "user_id",
+    "USER_ID_CLAIM": "user_id",
+    "ALGORITHM": "HS256",
+}

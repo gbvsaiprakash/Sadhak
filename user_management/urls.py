@@ -10,13 +10,17 @@ from .views import (
     ProfileUpdateAPIView,
     RefreshAccessTokenAPIView,
     RegistrationAPIView,
+    ResendOTPAPIView,
     ResetPasswordAPIView,
+    SetupPasswordAPIView,
 )
 
 
 urlpatterns = [
     path("register/", RegistrationAPIView.as_view(), name="register"),
     path("verify-email/", EmailVerificationAPIView.as_view(), name="verify_email"),
+    path("setup-password/", SetupPasswordAPIView.as_view(), name="setup_password"),
+    path("otp/resend/", ResendOTPAPIView.as_view(), name="resend_otp"),
     path("login/", LoginAPIView.as_view(), name="login"),
     path("forgot-password/", ForgotPasswordAPIView.as_view(), name="forgot_password"),
     path("reset-password/", ResetPasswordAPIView.as_view(), name="reset_password"),
