@@ -29,19 +29,22 @@ from sadhak.app_settings import (
     access_token_cookie,
     account_verification_code,
     ar_expiry,
+    setup_expiry,
     forgot_verification_code,
     fp_expiry,
     refresh_token_cookie,
+    access_token_seconds,
+    refresh_token_seconds,
+    SCOPE_FULL_AUTH,
+    SCOPE_EMAIL_VERIFY,
+    SCOPE_PASSWORD_RESET,
+    SCOPE_SETUP_PASSWORD
 )
 from .models import OTPVerification, User
 
 
 logger = logging.getLogger(__name__)
 
-
-SCOPE_FULL_AUTH = "full_auth"
-SCOPE_EMAIL_VERIFY = "email_verify"
-SCOPE_PASSWORD_RESET = "password_reset"
 
 
 class HasRequiredScope(BasePermission):
@@ -93,7 +96,7 @@ class RegistrationAPIView(APIView):
         if existing_verified_by_email:
             # if password is not set
             if not existing_verified_by_email.is_password_set:
-                access_token = _create_access_token(existing_verified_by_email, scope=SCOPE_EMAIL_VERIFY)
+                access_token,_ = _get_or_issue_scoped_access_token(existing_verified_by_email, scope=SCOPE_EMAIL_VERIFY,ttl_seconds=ar_expiry)
                 response = Response(
                     {
                         "detail": "Email already verified. Complete password setup.",
@@ -132,7 +135,7 @@ class RegistrationAPIView(APIView):
                     "Email verification OTP",
                 )
 
-            access_token = _create_access_token(existing_unverified_by_email, scope=SCOPE_EMAIL_VERIFY)
+            access_token,_ = _get_or_issue_scoped_access_token(existing_unverified_by_email, scope=SCOPE_EMAIL_VERIFY,ttl_seconds=ar_expiry)
             # if active otp exists
             response = Response(
                 {
@@ -169,7 +172,7 @@ class RegistrationAPIView(APIView):
             otp_value = _create_email_verification_otp(user)
 
         _send_otp_email(user.email, user.first_name, otp_value, "Email verification OTP")
-        access_token = _create_access_token(user, scope=SCOPE_EMAIL_VERIFY)
+        access_token,_ = _get_or_issue_scoped_access_token(user, scope=SCOPE_EMAIL_VERIFY,ttl_seconds=ar_expiry)
 
         response = Response(
             {
@@ -222,15 +225,17 @@ class EmailVerificationAPIView(AuthenticatedAPIView):
             user.is_email_verified = True
             user.save(update_fields=["is_email_verified", "updated_at"])
             _blacklist_request_access_token(request)
+            setup_token, _ = _get_or_issue_scoped_access_token(user, SCOPE_SETUP_PASSWORD, setup_expiry)
+
 
         response = Response({"detail": "Email verified successfully"}, status=status.HTTP_200_OK)
         logger.info("email_verification_success user_id=%s", user.user_id)
-        _clear_auth_cookies(response)
+        _set_auth_cookies(response=response,access_token=setup_token,access_token_expiry=setup_expiry,)
         return response
 
 
 class SetupPasswordAPIView(AuthenticatedAPIView):
-    required_token_scope = SCOPE_EMAIL_VERIFY
+    required_token_scope = SCOPE_SETUP_PASSWORD
 
     def post(self, request):
         new_password = request.data.get("new_password")
@@ -375,7 +380,7 @@ class ForgotPasswordAPIView(APIView):
         otp = _create_password_reset_otp(user)
         _send_otp_email(user.email, user.username, otp, "Password reset OTP")
 
-        access_token = _create_access_token(user, scope=SCOPE_PASSWORD_RESET)
+        access_token,_ = _get_or_issue_scoped_access_token(user, scope=SCOPE_PASSWORD_RESET,ttl_seconds=fp_expiry)
         response = Response(
             {"detail": f"If the {username} exists, an OTP has been sent to registered Email Address"},
             status=status.HTTP_200_OK,
@@ -577,7 +582,7 @@ class RefreshAccessTokenAPIView(APIView):
             _clear_auth_cookies(response)
             return response
 
-        access_token = _create_access_token(user, scope=SCOPE_FULL_AUTH)
+        access_token,_ = _get_or_issue_scoped_access_token(user, scope=SCOPE_FULL_AUTH,ttl_seconds=access_token_seconds)
         refresh_token = _rotate_refresh_token(refresh_raw, refresh_token, user)
 
         response = Response({"detail": "Access token refreshed"}, status=status.HTTP_200_OK)
@@ -593,7 +598,7 @@ def _create_email_verification_otp(user):
         user=user,
         otp_hash=make_password(otp),
         verification_type=account_verification_code,
-        expires_at=timezone.now() + timedelta(minutes=expiry_minutes),
+        expires_at=timezone.now() + timedelta(seconds=expiry_minutes),
     )
     return otp
 
@@ -605,7 +610,7 @@ def _create_password_reset_otp(user):
         user=user,
         otp_hash=make_password(otp),
         verification_type=forgot_verification_code,
-        expires_at=timezone.now() + timedelta(minutes=expiry_minutes),
+        expires_at=timezone.now() + timedelta(seconds=expiry_minutes),
     )
     return otp
 
@@ -638,7 +643,7 @@ def _send_otp_email(email, username, otp, subject):
         body = account_registration_template_html(username, otp)
     elif subject == "Password reset OTP":
         body = password_reset_template_html(username, otp)
-    send_email(subject,account_registration_template_html(username, otp),email,'html')
+    send_email(subject,body,email,'html')
 
 
 def _access_lifetime_seconds():
@@ -646,7 +651,7 @@ def _access_lifetime_seconds():
     lifetime = simple_jwt.get("ACCESS_TOKEN_LIFETIME")
     if lifetime is not None:
         return int(lifetime.total_seconds())
-    return 15 * 60
+    return  access_token_seconds
 
 
 def _refresh_lifetime_seconds():
@@ -654,20 +659,42 @@ def _refresh_lifetime_seconds():
     lifetime = simple_jwt.get("REFRESH_TOKEN_LIFETIME")
     if lifetime is not None:
         return int(lifetime.total_seconds())
-    return 7 * 24 * 60 * 60
+    return refresh_token_seconds
 
 
-def _create_access_token(user, scope=SCOPE_FULL_AUTH,expiry=None):
-    key = f"{user.user_id}:{scope}"
-    cached = cache.get(key)
-    if cached:
-        return cached
+def _create_access_token(user, scope=SCOPE_FULL_AUTH):
     token = AccessToken.for_user(user)
     token["token_version"] = user.token_version
     token["scope"] = scope
-    cache.set(key, str(token), timeout=expiry)
     return str(token)
 
+def _scoped_token_cache_key(user, scope: str) -> str:
+    return f"scoped_access:{user.user_id}:{scope}"
+
+def _get_or_issue_scoped_access_token(user, scope: str, ttl_seconds: int):
+    key = _scoped_token_cache_key(user, scope)
+
+    try:
+        cached = cache.get(key)
+    except Exception:
+        cached = None
+        logger.warning("cache_get_failed key=%s", key)
+
+    if cached:
+        try:
+            AccessToken(cached)  # validates exp/signature
+            return cached, False
+        except TokenError:
+            pass
+
+    token = _create_access_token(user, scope=scope)
+
+    try:
+        cache.set(key, token, timeout=ttl_seconds)
+    except Exception:
+        logger.warning("cache_set_failed key=%s", key)
+
+    return token, True
 
 def _create_refresh_token(user):
     refresh = RefreshToken.for_user(user)
@@ -765,12 +792,13 @@ def _extract_cookie_token(request, cookie_name):
     return request.COOKIES.get(cookie_name)
 
 
-def _set_auth_cookies(response, access_token=None, refresh_token=None, access_token_expiry=None):
+def _set_auth_cookies(response, access_token=None, refresh_token=None, access_token_expiry=None,refresh_token_expiry=None):
     if access_token:
         max_age = int(access_token_expiry) if access_token_expiry is not None else _access_lifetime_seconds()
         _set_cookie(response, access_token_cookie, access_token, max_age)
     if refresh_token:
-        _set_cookie(response, refresh_token_cookie, refresh_token, _refresh_lifetime_seconds())
+        max_age = int(refresh_token_expiry) if refresh_token_expiry is not None else _access_lifetime_seconds()
+        _set_cookie(response, refresh_token_cookie, refresh_token, max_age)
 
 
 def _set_cookie(response, key, token, max_age):
