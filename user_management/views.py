@@ -1,9 +1,12 @@
 import secrets
 from datetime import timedelta
 import logging
+import re
 from django.core.cache import cache
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
+from django.views.decorators.csrf import ensure_csrf_cookie
+from django.utils.decorators import method_decorator
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
@@ -13,8 +16,10 @@ from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
+from django.core.exceptions import ValidationError
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+from django.middleware.csrf import get_token
 from user_management.emails import send_email,account_registration_template_html,password_reset_template_html
 
 from .authentication import TokenCookieAuthentication
@@ -46,7 +51,6 @@ from .models import OTPVerification, User
 logger = logging.getLogger(__name__)
 
 
-
 class HasRequiredScope(BasePermission):
     def has_permission(self, request, view):
         required_scope = getattr(view, "required_token_scope", None)
@@ -69,7 +73,7 @@ class RegistrationAPIView(APIView):
 
     def post(self, request):
         data = request.data
-        username = (data.get("username") or "").strip()
+        username = (data.get("username") or "").strip().lower()
         email = (data.get("email") or "").strip().lower()
         first_name = (data.get("first_name") or "").strip()
         last_name = (data.get("last_name") or "").strip()
@@ -100,14 +104,13 @@ class RegistrationAPIView(APIView):
                 response = Response(
                     {
                         "detail": "Email already verified. Complete password setup.",
-                        "user_id": str(existing_verified_by_email.user_id),
                     },
                     status=status.HTTP_200_OK,
                 )
                 _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
                 return response
             # if all set return email already exists
-            return Response({"detail": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Email already registered. Please login or reset your password."}, status=status.HTTP_400_BAD_REQUEST)
 
         # check unverfied email exists
         existing_unverified_by_email = User.objects.filter(
@@ -122,7 +125,7 @@ class RegistrationAPIView(APIView):
                 .exclude(user_id=existing_unverified_by_email.user_id)
                 .exists()
             ):
-                return Response({"detail": "Username already exists"}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Username is not availabble"}, status=status.HTTP_400_BAD_REQUEST)
 
             active_otp = _get_active_otp(existing_unverified_by_email, account_verification_code)
             # if active otp not exists send email to verify
@@ -139,8 +142,7 @@ class RegistrationAPIView(APIView):
             # if active otp exists
             response = Response(
                 {
-                    "detail": "Verification OTP already sent. Continue email verification.",
-                    "user_id": str(existing_unverified_by_email.user_id),
+                    "detail": "An OTP has been sent to your email. Please verify your email to continue.",
                 },
                 status=status.HTTP_200_OK,
             )
@@ -152,7 +154,7 @@ class RegistrationAPIView(APIView):
             .exclude(email=email)
             .exists()
         ):
-            return Response({"detail": "Username already exists"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Username is not available"}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             user = User.objects.create(
@@ -177,7 +179,7 @@ class RegistrationAPIView(APIView):
         response = Response(
             {
                 "detail": "Registration successful. Verify email using OTP.",
-                "user_id": str(user.user_id),
+                # "user_id": str(user.user_id),
             },
             status=status.HTTP_201_CREATED,
         )
@@ -203,11 +205,11 @@ class EmailVerificationAPIView(AuthenticatedAPIView):
 
         if not otp_obj:
             logger.warning("email_verification_no_active_otp user_id=%s", user.user_id)
-            return Response({"detail": "No active OTP found"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "OTP has been expired"}, status=status.HTTP_400_BAD_REQUEST)
         if otp_obj.is_locked() or otp_obj.is_expired():
             logger.warning("email_verification_otp_locked_or_expired user_id=%s", user.user_id)
             otp_obj.invalidate()
-            return Response({"detail": "OTP expired or locked"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "OTP has been expired"}, status=status.HTTP_400_BAD_REQUEST)
 
         if not check_password(otp, otp_obj.otp_hash):
             otp_obj.attempt_count += 1
@@ -247,6 +249,9 @@ class SetupPasswordAPIView(AuthenticatedAPIView):
             )
         if new_password != confirm_password:
             return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not _password_check(new_password):
+            return Response({"detail":"Password must contain atleast 8 characters that include one uppercase, one lowercase, one number, and one special character."})
 
         user = request.user
         if not user.is_email_verified:
@@ -274,10 +279,9 @@ class ResendOTPAPIView(APIView):
         user = request.user
         token = getattr(request, "auth", None) or {}
         scope = token.get("scope")
-
         if scope == SCOPE_EMAIL_VERIFY:
             if user.is_email_verified:
-                return Response({"detail": "Email is already verified"}, status=status.HTTP_200_OK)
+                return Response({"detail": "Email has been registered"}, status=status.HTTP_200_OK)
             verification_type = account_verification_code
             subject = "Email verification OTP"
             create_otp_fn = _create_email_verification_otp
@@ -292,8 +296,8 @@ class ResendOTPAPIView(APIView):
             )
 
         active_otp = _get_active_otp(user, verification_type)
-        if active_otp:
-            return Response({"detail": "An active OTP already exists."}, status=status.HTTP_200_OK)
+        if active_otp and (timezone.now() - active_otp.created_at).seconds < 60:
+            return Response({"detail": "An OTP has been sent to your registered email."}, status=status.HTTP_200_OK)
 
         with transaction.atomic():
             OTPVerification.objects.filter(
@@ -303,7 +307,7 @@ class ResendOTPAPIView(APIView):
             ).update(is_used=True)
             otp = create_otp_fn(user)
 
-        _send_otp_email(user.email, user.first_name or user.username, otp, subject)
+        _send_otp_email(user.email, user.username or user.first_name, otp, subject)
         return Response({"detail": "OTP resent successfully"}, status=status.HTTP_200_OK)
 
 
@@ -334,7 +338,7 @@ class LoginAPIView(APIView):
         if not user.is_password_set:
             logger.warning("login_failed_password_not_set user_id=%s", user.user_id)
             return Response(
-                {"detail": "Password not set. Complete account setup."},
+                {"detail": "Your account does not have a password set yet. Please create a password to continue."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -376,15 +380,18 @@ class ForgotPasswordAPIView(APIView):
                 {"detail": f"If the {username} exists, an OTP has been sent to registered Email Address"},
                 status=status.HTTP_200_OK,
             )
-
+        active_otp = _get_active_otp(user, forgot_verification_code)
+        if active_otp and (timezone.now() - active_otp.created_at).seconds < 60:
+            return Response({"detail": "An OTP has been sent to your registered email."}, status=status.HTTP_200_OK)
         otp = _create_password_reset_otp(user)
-        _send_otp_email(user.email, user.username, otp, "Password reset OTP")
+        _send_otp_email(user.email, user.username or user.first_name, otp, "Password reset OTP")
 
         access_token,_ = _get_or_issue_scoped_access_token(user, scope=SCOPE_PASSWORD_RESET,ttl_seconds=fp_expiry)
         response = Response(
             {"detail": f"If the {username} exists, an OTP has been sent to registered Email Address"},
             status=status.HTTP_200_OK,
         )
+        get_token(request)
         _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=fp_expiry)
         logger.info("forgot_password_otp_issued user_id=%s", user.user_id)
         return response
@@ -406,6 +413,8 @@ class ResetPasswordAPIView(AuthenticatedAPIView):
             )
         if new_password != confirm_password:
             return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
+        if not _password_check(new_password):
+            return Response({"detail":"Password must contain atleast 8 characters that include one uppercase, one lowercase, one number, and one special character."})
 
         user = request.user
         otp_obj = (
@@ -461,6 +470,9 @@ class PasswordChangeAPIView(AuthenticatedAPIView):
             )
         if new_password != confirm_password:
             return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
+        if not _password_check(new_password):
+            return Response({"detail":"Password must contain atleast 8 characters that include one uppercase, one lowercase, one number, and one special character."})
+
 
         user = request.user
         if not check_password(old_password, user.password):
@@ -563,7 +575,6 @@ class CreateRefreshTokenAPIView(AuthenticatedAPIView):
 
 
 class RefreshAccessTokenAPIView(APIView):
-    permission_classes = [AllowAny]
     throttle_classes = [RefreshRateThrottle]
 
     def post(self, request):
@@ -593,24 +604,24 @@ class RefreshAccessTokenAPIView(APIView):
 
 def _create_email_verification_otp(user):
     otp = _generate_otp()
-    expiry_minutes = int(ar_expiry)
+    expiry_seconds = int(ar_expiry)
     OTPVerification.objects.create(
         user=user,
         otp_hash=make_password(otp),
         verification_type=account_verification_code,
-        expires_at=timezone.now() + timedelta(seconds=expiry_minutes),
+        expires_at=timezone.now() + timedelta(seconds=expiry_seconds),
     )
     return otp
 
 
 def _create_password_reset_otp(user):
     otp = _generate_otp()
-    expiry_minutes = int(fp_expiry)
+    expiry_seconds = int(fp_expiry)
     OTPVerification.objects.create(
         user=user,
         otp_hash=make_password(otp),
         verification_type=forgot_verification_code,
-        expires_at=timezone.now() + timedelta(seconds=expiry_minutes),
+        expires_at=timezone.now() + timedelta(seconds=expiry_seconds),
     )
     return otp
 
@@ -791,14 +802,24 @@ def _blacklist_request_access_token(request):
 def _extract_cookie_token(request, cookie_name):
     return request.COOKIES.get(cookie_name)
 
+def _password_check(password):
+    pattern = r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_]).{8,}$'
+
+    if not re.match(pattern, password):
+        # raise ValidationError(
+        #     "Password must contain atleast 8 characters that include one uppercase, one lowercase, one number, and one special character."
+        # )
+        return False
+    return True
 
 def _set_auth_cookies(response, access_token=None, refresh_token=None, access_token_expiry=None,refresh_token_expiry=None):
     if access_token:
         max_age = int(access_token_expiry) if access_token_expiry is not None else _access_lifetime_seconds()
         _set_cookie(response, access_token_cookie, access_token, max_age)
     if refresh_token:
-        max_age = int(refresh_token_expiry) if refresh_token_expiry is not None else _access_lifetime_seconds()
+        max_age = int(refresh_token_expiry) if refresh_token_expiry is not None else _refresh_lifetime_seconds()
         _set_cookie(response, refresh_token_cookie, refresh_token, max_age)
+    
 
 
 def _set_cookie(response, key, token, max_age):

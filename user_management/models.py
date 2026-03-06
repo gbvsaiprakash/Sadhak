@@ -87,9 +87,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     """Custom auth user compatible with Django auth/SimpleJWT token_blacklist."""
 
     user_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    username = models.CharField(max_length=30, unique=True)
-    email = models.EmailField(max_length=255, unique=True)
-
+    username = models.CharField(max_length=30,unique=True)
+    email = models.EmailField(max_length=255)
     first_name = models.CharField(max_length=255)
     last_name = models.CharField(max_length=255, null=True, blank=True)
     age = models.PositiveSmallIntegerField(null=True, blank=True)
@@ -143,3 +142,10 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.username
+    
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["email"],
+                condition=models.Q(is_deleted=False),
+                name="unique_active_email"),models.UniqueConstraint(fields=["username"],
+                condition=models.Q(is_deleted=False),
+                name="unique_active_username")]

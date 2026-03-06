@@ -1,11 +1,11 @@
 from django.core.cache import cache
 from rest_framework.authentication import CSRFCheck
+from rest_framework.response import Response
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.settings import api_settings
-
+from rest_framework.permissions import AllowAny
 from sadhak.app_settings import access_token_cookie
-
 
 class TokenCookieAuthentication(JWTAuthentication):
     """SimpleJWT auth with cookie fallback and CSRF protection for cookie auth."""
@@ -44,8 +44,15 @@ class TokenCookieAuthentication(JWTAuthentication):
             raw_token = self.get_raw_token(header)
             if raw_token is None:
                 return None
+        view = getattr(request, "resolver_match", None)
+        if view:
+            view_func = view.func
+            permission_classes = getattr(view_func.cls, "permission_classes", [])
 
-        if from_cookie:
+            if AllowAny in permission_classes:
+                from_cookie = False
+
+        if from_cookie and request.method not in ("GET", "HEAD", "OPTIONS"):
             self._enforce_csrf(request)
 
         validated_token = self.get_validated_token(raw_token)
