@@ -2,8 +2,10 @@ import uuid
 from datetime import timedelta
 
 from django.db import models
+from django.db.models.functions import Lower
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
 from django.contrib.auth.models import PermissionsMixin
+
 from django.utils import timezone
 
 
@@ -146,6 +148,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     class Meta:
         constraints = [models.UniqueConstraint(fields=["email"],
                 condition=models.Q(is_deleted=False),
-                name="unique_active_email"),models.UniqueConstraint(fields=["username"],
+                name="unique_active_email"),models.UniqueConstraint(Lower("username"),
                 condition=models.Q(is_deleted=False),
                 name="unique_active_username")]

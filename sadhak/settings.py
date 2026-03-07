@@ -61,6 +61,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'middleware.DecodeAuthenticationMiddleware.DebugAuthenticationMiddleware',
 ]
 
 SESSION_ENGINE = 'django.contrib.sessions.backends.db' # store session in db by default to handle persistent server-side sessions

@@ -73,7 +73,7 @@ class RegistrationAPIView(APIView):
 
     def post(self, request):
         data = request.data
-        username = (data.get("username") or "").strip().lower()
+        username = (data.get("username") or "").strip()
         email = (data.get("email") or "").strip().lower()
         first_name = (data.get("first_name") or "").strip()
         last_name = (data.get("last_name") or "").strip()
@@ -88,12 +88,9 @@ class RegistrationAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # if password != confirm_password:
-        #     return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
-
         # if verified user with username exists
-        if User.objects.filter(username=username, is_email_verified=True).exists():
-            return Response({"detail": "Username already exists"}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(username__iexact=username, is_email_verified=True).exists():
+            return Response({"detail": "Username is not available"}, status=status.HTTP_400_BAD_REQUEST)
 
         # existing verified user
         existing_verified_by_email = User.objects.filter(email=email, is_email_verified=True).first()
@@ -121,11 +118,11 @@ class RegistrationAPIView(APIView):
         if existing_unverified_by_email:
             # check if a person try to register with username exists with same email
             if (
-                User.objects.filter(username=username)
+                User.objects.filter(username__iexact=username)
                 .exclude(user_id=existing_unverified_by_email.user_id)
                 .exists()
             ):
-                return Response({"detail": "Username is not availabble"}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Username is not available"}, status=status.HTTP_400_BAD_REQUEST)
 
             active_otp = _get_active_otp(existing_unverified_by_email, account_verification_code)
             # if active otp not exists send email to verify
@@ -150,12 +147,21 @@ class RegistrationAPIView(APIView):
             return response
         
         if (
-            User.objects.filter(username=username, is_email_verified=False, is_deleted=False)
+            User.objects.filter(username__iexact=username, is_email_verified=False, is_deleted=False)
             .exclude(email=email)
             .exists()
         ):
             return Response({"detail": "Username is not available"}, status=status.HTTP_400_BAD_REQUEST)
 
+        if age:
+            if not isinstance(age,int) or age<=0:
+                return Response({"detail": "Age should be a positive number"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if gender:
+            valid_genders = {choice[0] for choice in User.GENDER_CHOICES}
+            if gender not in valid_genders:
+                return Response({"detail": "Invalid gender"}, status=status.HTTP_400_BAD_REQUEST)
+            
         with transaction.atomic():
             user = User.objects.create(
                 username=username,
@@ -316,7 +322,7 @@ class LoginAPIView(APIView):
     throttle_classes = [LoginIdentifierRateThrottle]
 
     def post(self, request):
-        identifier = (request.data.get("identifier") or "").strip().lower()
+        identifier = (request.data.get("identifier") or "").strip()
         password = request.data.get("password")
 
         if not identifier or not password:
@@ -341,7 +347,10 @@ class LoginAPIView(APIView):
                 {"detail": "Your account does not have a password set yet. Please create a password to continue."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-
+        
+        user.token_version += 1
+        user.last_login = timezone.now()
+        user.save(update_fields=["token_version","last_login"])
         old_refresh = _extract_cookie_token(request, refresh_token_cookie)
         if old_refresh:
             _blacklist_refresh_token_by_raw(old_refresh)
@@ -351,7 +360,6 @@ class LoginAPIView(APIView):
             {
                 "detail": "Login successful",
                 "user": {
-                    "user_id": str(user.user_id),
                     "username": user.username,
                     "email": user.email,
                     "roles": user.get_roles(),
@@ -369,7 +377,7 @@ class ForgotPasswordAPIView(APIView):
     throttle_classes = [ForgotPasswordIdentifierRateThrottle]
 
     def post(self, request):
-        username = (request.data.get("username") or "").strip().lower()
+        username = (request.data.get("username") or "").strip()
         if not username:
             return Response({"detail": "username is required"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -458,7 +466,7 @@ class ResetPasswordAPIView(AuthenticatedAPIView):
 
 
 class PasswordChangeAPIView(AuthenticatedAPIView):
-    def post(self, request):
+    def put(self, request):
         old_password = request.data.get("old_password")
         new_password = request.data.get("new_password")
         confirm_password = request.data.get("confirm_password")
@@ -468,6 +476,8 @@ class PasswordChangeAPIView(AuthenticatedAPIView):
                 {"detail": "old_password, new_password and confirm_password are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if old_password == new_password:
+            return Response({"detail":"New Password should not match old passwords."})
         if new_password != confirm_password:
             return Response({"detail": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
         if not _password_check(new_password):
@@ -506,7 +516,7 @@ class ProfileUpdateAPIView(AuthenticatedAPIView):
             username = (updates["username"] or "").strip()
             if not username:
                 return Response({"detail": "username cannot be blank"}, status=status.HTTP_400_BAD_REQUEST)
-            if User.objects.filter(username=username).exclude(user_id=user.user_id).exists():
+            if User.objects.filter(username__iexact=username).exclude(user_id=user.user_id).exists():
                 return Response({"detail": "Username already exists"}, status=status.HTTP_400_BAD_REQUEST)
             updates["username"] = username
 
@@ -517,6 +527,10 @@ class ProfileUpdateAPIView(AuthenticatedAPIView):
             valid_genders = {choice[0] for choice in User.GENDER_CHOICES}
             if updates["gender"] not in valid_genders:
                 return Response({"detail": "Invalid gender"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if "age" in updates:
+            if not isinstance(updates.get("age"),int) or updates.get("age")<=0:
+                return Response({"detail": "Age should be a positive number"}, status=status.HTTP_400_BAD_REQUEST)
 
         for field, value in updates.items():
             setattr(user, field, value)
@@ -575,6 +589,7 @@ class CreateRefreshTokenAPIView(AuthenticatedAPIView):
 
 
 class RefreshAccessTokenAPIView(APIView):
+    permission_classes = [AllowAny]
     throttle_classes = [RefreshRateThrottle]
 
     def post(self, request):
