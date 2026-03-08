@@ -151,3 +151,23 @@ class User(AbstractBaseUser, PermissionsMixin):
                 name="unique_active_email"),models.UniqueConstraint(Lower("username"),
                 condition=models.Q(is_deleted=False),
                 name="unique_active_username")]
+
+class AuditLog(models.Model):
+
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+
+    action = models.CharField(max_length=100)
+
+    endpoint = models.CharField(max_length=255)
+
+    ip_address = models.GenericIPAddressField(null=True)
+
+    device_type = models.CharField(max_length=100, null=True)
+
+    request_data = models.JSONField(null=True, blank=True)
+
+    response_data = models.JSONField(null=True, blank=True)
+
+    status_code = models.IntegerField()
+
+    created_at = models.DateTimeField(auto_now_add=True)

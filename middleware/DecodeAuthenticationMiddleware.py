@@ -8,6 +8,7 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework_simplejwt.tokens import AccessToken
 from django.http.multipartparser import MultiPartParser
 from django.utils.datastructures import MultiValueDictKeyError
+from user_management.models import AuditLog
 
 from user_management.models import User
 # from utils import set_current_user
@@ -23,6 +24,17 @@ def get_additional_meta_data(request):
         print("No Additional Meta Data Found", e)
         return {}
 
+def get_device_data(request):
+    data = {}
+    x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+    data["device_type"] = request.META.get("HTTP_USER_AGENT", "")
+
+    if x_forwarded_for:
+        data['device_id'] = x_forwarded_for.split(",")[0]
+    else:
+        data['device_id'] = request.META.get("REMOTE_ADDR")
+
+    return data
 
 class DebugAuthenticationMiddleware:
     def __init__(self, get_response):
@@ -30,6 +42,9 @@ class DebugAuthenticationMiddleware:
 
     def __call__(self, request):
         custom_auth_token = request.headers.get("CustomAuthToken")
+        log_data = {"action":request.resolver_match,"method":request.method,"path":request.path,"request_data":None,"response_data":None,"status":None}
+        if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"]:
+            log_data["request_data"] = json.loads(request.body)
 
         if custom_auth_token:
             request.META["HTTP_AUTHORIZATION"] = f"Bearer {custom_auth_token}"
@@ -69,13 +84,14 @@ class DebugAuthenticationMiddleware:
         if user and request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"]:
 
             additional_meta_data = get_additional_meta_data(request)
+            device_data = get_device_data(request)
 
             meta_data = {
                 "created_by": user.user_id,
                 "updated_by": user.user_id,
                 "updated_by_name": user.first_name,
-                "device_id": "device_id",
-                "device_type": "device_type",
+                "device_id": device_data.get("device_id"),
+                "device_type": device_data.get("device_type"),
                 **additional_meta_data,
             }
             # set_current_user(
@@ -91,8 +107,8 @@ class DebugAuthenticationMiddleware:
                     body_data = request.body or json.dumps({})
                     data = json.loads(body_data)
 
-                    data["logged_user"] = user.username
-                    data["meta_data"] = meta_data
+                    data["logged_user"] = log_data["user"] = user.username
+                    data["meta_data"] = log_data["meta_data"] = meta_data
 
                     request._body = json.dumps(data, default=str).encode("utf-8")
 
@@ -132,4 +148,20 @@ class DebugAuthenticationMiddleware:
                     print(f"Error parsing multipart data: {e}")
 
         response = self.get_response(request)
+        log_data["action"] = request.resolver_match.view_name
+        log_data["status"] = response.status_code
+        if request.get_full_path() in ["api/user/login/", "/api/user/token/refresh/"]:
+            log_data["request_data"] = None
+        if log_data["status"] >= 400:
+            log_data["response_data"] = json.dumps(response.data,default=str)
+        log = AuditLog.objects.create(
+            user=user,
+            action=log_data.get("action",""),
+            endpoint=log_data.get("path"),
+            ip_address=log_data.get("meta_data",{}).get("device_id"),
+            device_type=log_data.get("meta_data",{}).get("device_type"),
+            request_data=log_data.get("request_data"),
+            response_data=log_data.get("response_data"),
+            status_code=log_data.get("status")
+            )
         return response
