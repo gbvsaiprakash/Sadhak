@@ -699,12 +699,11 @@ def _scoped_token_cache_key(user, scope: str) -> str:
 
 def _get_or_issue_scoped_access_token(user, scope: str, ttl_seconds: int):
     key = _scoped_token_cache_key(user, scope)
-
     try:
         cached = cache.get(key)
-    except Exception:
+    except Exception as e:
         cached = None
-        logger.warning("cache_get_failed key=%s", key)
+        logger.warning("cache_get_failed key=%s", key, e)
 
     if cached:
         try:
@@ -717,8 +716,8 @@ def _get_or_issue_scoped_access_token(user, scope: str, ttl_seconds: int):
 
     try:
         cache.set(key, token, timeout=ttl_seconds)
-    except Exception:
-        logger.warning("cache_set_failed key=%s", key)
+    except Exception as e:
+        logger.warning("cache_set_failed key=%s", key, e)
 
     return token, True
 
