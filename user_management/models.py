@@ -162,7 +162,7 @@ class AuditLog(models.Model):
 
     ip_address = models.GenericIPAddressField(null=True)
 
-    device_type = models.CharField(max_length=100, null=True)
+    device_type = models.CharField(max_length=300, null=True)
 
     request_data = models.JSONField(null=True, blank=True)
 

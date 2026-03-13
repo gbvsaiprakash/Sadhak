@@ -7,6 +7,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from email.utils import make_msgid
 from datetime import datetime
+from smtplib import SMTPException
 
 
 def account_registration_template_html(username, otp):
@@ -153,13 +154,14 @@ def send_email(subject, body, recipient_email, body_type='plain', attachment=Non
             server.starttls()
             server.login(CUSTOM_EMAIL_HOST_USER, CUSTOM_EMAIL_HOST_PASSWORD)
             text = msg.as_string()
-            server.sendmail(CUSTOM_EMAIL_HOST_USER, recipient_email, text)
-
+            failed = server.sendmail(CUSTOM_EMAIL_HOST_USER, recipient_email, text)
+            if failed:
+                return False,"wrong_email"
         # logger.info(msg=f"Email successfully sent to {recipient_email}", 
         #             extra={"data": {"type":"email_communication","message_data":text}})
         print(f"Email successfully sent to {recipient_email}")
-        return True
+        return True,"sent"
     except Exception as e:
         # error_logger.error(msg=f"Failed to send email to {recipient_email}", extra={"data": str(e)})
         print(f"Failed to send email to {recipient_email} due to {str(e)}")
-        return False
+        return False,"error me"

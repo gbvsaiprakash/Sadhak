@@ -36,15 +36,26 @@ def get_device_data(request):
 
     return data
 
+def remove_token_fields(obj):
+    if isinstance(obj, dict):
+        # Filter keys ending in "token" (case-insensitive)
+        return {k: remove_token_fields(v) for k, v in obj.items() 
+                if not k.lower().endswith('token')}
+    elif isinstance(obj, list):
+        return [remove_token_fields(item) for item in obj]
+    else:
+        return obj
+
 class DebugAuthenticationMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
+        print(request.headers)
         custom_auth_token = request.headers.get("CustomAuthToken")
         log_data = {"action":request.resolver_match,"method":request.method,"path":request.path,"request_data":None,"response_data":None,"status":None}
-        if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"]:
-            log_data["request_data"] = json.loads(request.body)
+        if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"] and request.body:
+            log_data["request_data"] = remove_token_fields(json.loads(request.body))
 
         if custom_auth_token:
             request.META["HTTP_AUTHORIZATION"] = f"Bearer {custom_auth_token}"
@@ -148,12 +159,13 @@ class DebugAuthenticationMiddleware:
                     print(f"Error parsing multipart data: {e}")
 
         response = self.get_response(request)
-        log_data["action"] = request.resolver_match.view_name
+        log_data["action"] = "API Documentation" if request.get_full_path() == "/APIDocumentation/" else request.resolver_match.view_name
         log_data["status"] = response.status_code
         if request.get_full_path() in ["api/user/login/", "/api/user/token/refresh/"]:
             log_data["request_data"] = None
-        if log_data["status"] >= 400:
+        if log_data["status"] >= 400 and request.get_full_path() != "/APIDocumentation/":
             log_data["response_data"] = json.dumps(response.data,default=str)
+        print(log_data)
         log = AuditLog.objects.create(
             user=user,
             action=log_data.get("action",""),
