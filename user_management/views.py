@@ -236,7 +236,8 @@ class EmailVerificationAPIView(AuthenticatedAPIView):
             otp_obj.is_used = True
             otp_obj.save(update_fields=["is_used"])
             user.is_email_verified = True
-            user.save(update_fields=["is_email_verified", "updated_at"])
+            user.verified_at = timezone.now()
+            user.save(update_fields=["is_email_verified", "verified_at", "updated_at"])
             _blacklist_request_access_token(request)
             setup_token, _ = _get_or_issue_scoped_access_token(user, SCOPE_SETUP_PASSWORD, setup_expiry)
 
@@ -505,11 +506,31 @@ class PasswordChangeAPIView(AuthenticatedAPIView):
 
         response = Response({"message": "Password changed successfully"}, status=status.HTTP_200_OK)
         logger.info("password_change_success user_id=%s", user.user_id)
-        _clear_auth_cookies(response)
+        # _clear_auth_cookies(response)
         return response
 
 
-class ProfileUpdateAPIView(AuthenticatedAPIView):
+class ProfileAPIView(AuthenticatedAPIView):
+    def get(self,request):
+        user = request.user
+        return Response(
+            {
+                "message": "Profile fetched successfully",
+                "user": {
+                    "username": user.username,
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "age": user.age,
+                    "gender": user.gender,
+                    "is_email_verified": user.is_email_verified,
+                    "verified_at": user.verified_at,
+                    "roles": user.get_roles(),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+    
     def patch(self, request):
         user = request.user
         allowed_fields = {"username", "first_name", "last_name", "age", "gender"}
@@ -621,7 +642,6 @@ class RefreshAccessTokenAPIView(APIView):
         _set_auth_cookies(response, access_token=None, refresh_token=refresh_token)
         logger.info("refresh_access_success user_id=%s", user.user_id)
         return response
-
 
 def _create_email_verification_otp(user):
     otp = _generate_otp()

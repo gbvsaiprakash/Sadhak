@@ -98,9 +98,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     GENDER_CHOICES = (
         ("M", "Male"),
         ("F", "Female"),
-        ("O", "Other"),
+        ("O", "Others"),
+        ("PNS", "Prefer Not To Say")
     )
-    gender = models.CharField(max_length=1, choices=GENDER_CHOICES, null=True, blank=True)
+    gender = models.CharField(max_length=3, choices=GENDER_CHOICES, null=True, blank=True)
 
     roles = models.PositiveIntegerField(default=0, help_text="Bitmask value representing user roles")
     ROLE_USER = 1
@@ -116,6 +117,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     token_version = models.PositiveIntegerField(default=0)
 
     created_at = models.DateTimeField(auto_now_add=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = UserManager()

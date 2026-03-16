@@ -51,7 +51,6 @@ class DebugAuthenticationMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        print(request.headers)
         custom_auth_token = request.headers.get("CustomAuthToken")
         log_data = {"action":request.resolver_match,"method":request.method,"path":request.path,"request_data":None,"response_data":None,"status":None}
         if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"] and request.body:
@@ -159,13 +158,14 @@ class DebugAuthenticationMiddleware:
                     print(f"Error parsing multipart data: {e}")
 
         response = self.get_response(request)
-        log_data["action"] = "API Documentation" if request.get_full_path() == "/APIDocumentation/" else request.resolver_match.view_name
+        if log_data["path"] in ["/APIDocumentation","/"]:
+            return response
+        log_data["action"] = request.resolver_match.view_name
         log_data["status"] = response.status_code
         if request.get_full_path() in ["api/user/login/", "/api/user/token/refresh/"]:
             log_data["request_data"] = None
-        if log_data["status"] >= 400 and request.get_full_path() != "/APIDocumentation/":
+        if log_data["status"] >= 400 and request.get_full_path() not in ["/APIDocumentation/","/"]:
             log_data["response_data"] = json.dumps(response.data,default=str)
-        print(log_data)
         log = AuditLog.objects.create(
             user=user,
             action=log_data.get("action",""),
