@@ -84,7 +84,11 @@ class ForgotPasswordIdentifierRateThrottle(IdentifierIPRateThrottle):
     rate = "5/min"
     identifier_fields = ("username", "email")
 
-
 class RefreshRateThrottle(ClientIPRateThrottle):
     scope = "refresh"
     rate = "12/min"
+
+class AccountDeletionRateThrottle(UserRateThrottle):
+    scope = "account_delete_identifier"
+    rate = "6/min"
+

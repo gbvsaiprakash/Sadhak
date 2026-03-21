@@ -95,6 +95,68 @@ def password_reset_template_html(username, otp):
 </html>
 """
 
+def account_deletion_template_html(username, otp):
+    """
+    HTML template for account deletion request.
+    """
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Account Deletion Request</title>
+</head>
+<body style="margin:0;padding:0;background:#fef2f2;font-family:Arial,sans-serif;color:#1f2937;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#fef2f2;padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="background:#ffffff;border: 1px solid #fee2e2; border-radius:10px;overflow:hidden;">
+          <!-- Header with Red Alert Color -->
+          <tr>
+            <td style="background:#dc2626;color:#ffffff;padding:20px 24px;font-size:20px;font-weight:700;">
+              Confirm Account Deletion
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px;">
+              <p style="margin:0 0 12px 0;font-size:16px;">Hi <strong>{username}</strong>,</p>
+              <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">
+                We received a request to <strong>permanently delete</strong> your account. This action cannot be undone. Please use the verification code below to proceed:
+              </p>
+              
+              <!-- OTP Box -->
+              <div style="background:#f9fafb; padding:20px; text-align:center; border-radius:8px; margin-bottom:20px;">
+                <p style="margin:0;font-size:32px;font-weight:700;letter-spacing:6px;color:#dc2626;">{otp}</p>
+              </div>
+
+              <!-- Security Warning Box -->
+              <div style="border-left: 4px solid #dc2626; background: #fff1f0; padding: 16px; margin-bottom: 20px;">
+                <p style="margin:0; font-size:14px; font-weight:700; color:#991b1b;">⚠️ SECURITY ALERT</p>
+                <p style="margin:8px 0 0 0; font-size:14px; line-height:1.5; color:#b91c1c;">
+                  If you did <strong>NOT</strong> request this deletion, someone may have unauthorized access to your account. Please <strong>change your password immediately</strong> and contact our support team to secure your data.
+                </p>
+              </div>
+
+              <p style="margin:0;font-size:13px;color:#6b7280;line-height:1.6;">
+                If this was you, you can safely ignore the warning above. This code will expire shortly.
+              </p>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f9fafb; padding:16px 24px; text-align:center; font-size:12px; color:#9ca3af;">
+                &copy; {username.split('@')[0]} Security Team
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
+
 
 def send_email(subject, body, recipient_email, body_type='plain', attachment=None, attachment_name="attachment.pdf",is_unique_subject=True, email_config={}):
     """

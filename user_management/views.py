@@ -20,7 +20,7 @@ from django.core.exceptions import ValidationError
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from django.middleware.csrf import get_token
-from user_management.emails import send_email,account_registration_template_html,password_reset_template_html
+from user_management.emails import send_email,account_registration_template_html,password_reset_template_html,account_deletion_template_html
 
 from .authentication import TokenCookieAuthentication
 from .throttles import (
@@ -29,12 +29,15 @@ from .throttles import (
     RefreshRateThrottle,
     UserOTPVerifyRateThrottle,
     UserResetPasswordRateThrottle,
+    AccountDeletionRateThrottle,
 )
 from sadhak.app_settings import (
     access_token_cookie,
     account_verification_code,
+    account_deletion_code,
     ar_expiry,
     setup_expiry,
+    ad_expiry,
     forgot_verification_code,
     fp_expiry,
     refresh_token_cookie,
@@ -43,7 +46,8 @@ from sadhak.app_settings import (
     SCOPE_FULL_AUTH,
     SCOPE_EMAIL_VERIFY,
     SCOPE_PASSWORD_RESET,
-    SCOPE_SETUP_PASSWORD
+    SCOPE_SETUP_PASSWORD,
+    SCOPE_ACCOUNT_DELETE
 )
 from .models import OTPVerification, User
 
@@ -91,9 +95,8 @@ class RegistrationAPIView(APIView):
         # if verified user with username exists
         if User.objects.filter(username__iexact=username, is_email_verified=True).exists():
             return Response({"message": "Username is not available"}, status=status.HTTP_400_BAD_REQUEST)
-
         # existing verified user
-        existing_verified_by_email = User.objects.filter(email=email, is_email_verified=True).first()
+        existing_verified_by_email = User.objects.filter(email=email, is_email_verified=True, is_deleted=False).first()
         if existing_verified_by_email:
             # if password is not set
             if not existing_verified_by_email.is_password_set:
@@ -411,6 +414,82 @@ class ForgotPasswordAPIView(APIView):
         logger.info("forgot_password_otp_issued user_id=%s", user.user_id)
         return response
 
+class DeleteAccountAPIView(AuthenticatedAPIView):
+    throttle_classes = [AccountDeletionRateThrottle]
+
+    def post(self,request):
+        otp = (request.data.get("otp") or "").strip()
+        if not otp:
+            return Response({"message": "otp is required"}, status=status.HTTP_400_BAD_REQUEST)
+        user = request.user
+        otp_obj = (
+            OTPVerification.objects.filter(user=user, verification_type=account_deletion_code, is_used=False)
+            .order_by("-created_at")
+            .first()
+        )
+
+        if not otp_obj:
+            logger.warning("account_deletion_no_active_otp user_id=%s", user.user_id)
+            return Response({"message": "No active OTP found"}, status=status.HTTP_400_BAD_REQUEST)
+        if otp_obj.is_locked() or otp_obj.is_expired():
+            logger.warning("account_deletion_otp_locked_or_expired user_id=%s", user.user_id)
+            otp_obj.invalidate()
+            return Response({"message": "OTP expired or locked"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not check_password(otp, otp_obj.otp_hash):
+            otp_obj.attempt_count += 1
+            fields = ["attempt_count"]
+            if otp_obj.attempt_count >= otp_obj.max_attempts:
+                otp_obj.is_used = True
+                fields.append("is_used")
+            otp_obj.save(update_fields=fields)
+            logger.warning("reset_password_invalid_otp user_id=%s", user.user_id)
+            return Response({"message": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        with transaction.atomic():
+            user.token_version += 1
+            user.is_deleted = True
+            user.save(update_fields=["is_deleted", "token_version", "updated_at"])
+            otp_obj.is_used = True
+            otp_obj.save(update_fields=["is_used"])
+            _blacklist_refresh_token_by_raw(_extract_cookie_token(request, refresh_token_cookie))
+            _blacklist_request_access_token(request)
+
+        response = Response({"message": "Account Deleted Successfully, Sad to see you go!"}, status=status.HTTP_200_OK)
+        logger.info("account_deletion_success user_id=%s", user.user_id)
+        _clear_auth_cookies(response)
+        return response
+
+
+
+
+class DeleteOTPRequestAPIView(AuthenticatedAPIView):
+    throttle_classes = [AccountDeletionRateThrottle]
+
+    def post(self, request):
+        user = request.user
+        user = User.objects.filter(username=user.username, is_deleted=False).first()
+        if not user:
+            username = user.user_name
+            logger.info("account_deletion_requested_unknown_username username=%s", username)
+            return Response(
+                {"message": f"An OTP has been sent to registered Email Address"},
+                status=status.HTTP_200_OK,
+            )
+        active_otp = _get_active_otp(user, account_deletion_code)
+        if active_otp and (timezone.now() - active_otp.created_at).seconds < 60:
+            return Response({"message": "An OTP has been sent to your registered email."}, status=status.HTTP_200_OK)
+        otp = _create_account_delete_otp(user)
+        if not _send_otp_email(user.email, user.username or user.first_name, otp, "Account Deletion OTP"):
+            return Response({"message":"Unable to send email. please try again later."},status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        response = Response(
+            {"message": f"An OTP has been sent to registered Email Address"},
+            status=status.HTTP_200_OK,
+        )
+        get_token(request)
+        logger.info("account_deletion_otp_issued user_id=%s", user.user_id)
+        return response
 
 class ResetPasswordAPIView(AuthenticatedAPIView):
     required_token_scope = SCOPE_PASSWORD_RESET
@@ -654,6 +733,16 @@ def _create_email_verification_otp(user):
     )
     return otp
 
+def _create_account_delete_otp(user):
+    otp = _generate_otp()
+    expiry_seconds = int(ad_expiry)
+    OTPVerification.objects.create(
+        user=user,
+        otp_hash=make_password(otp),
+        verification_type=account_deletion_code,
+        expires_at=timezone.now() + timedelta(seconds=expiry_seconds),
+    )
+    return otp
 
 def _create_password_reset_otp(user):
     otp = _generate_otp()
@@ -695,6 +784,8 @@ def _send_otp_email(email, username, otp, subject):
         body = account_registration_template_html(username, otp)
     elif subject == "Password reset OTP":
         body = password_reset_template_html(username, otp)
+    elif subject == "Account Deletion OTP":
+        body = account_deletion_template_html(username, otp)
     sent,message = send_email(subject,body,email,'html')
     if message == "error me":
         return False
@@ -735,8 +826,9 @@ def _get_or_issue_scoped_access_token(user, scope: str, ttl_seconds: int):
 
     if cached:
         try:
-            AccessToken(cached)  # validates exp/signature
-            return cached, False
+            stored_token = AccessToken(cached)  # validates exp/signature
+            if not cache.get(f"access_blacklist:{stored_token.get('jti')}"):
+                return cached, False
         except TokenError:
             pass
 

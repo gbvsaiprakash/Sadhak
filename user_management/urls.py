@@ -13,6 +13,8 @@ from .views import (
     ResendOTPAPIView,
     ResetPasswordAPIView,
     SetupPasswordAPIView,
+    DeleteOTPRequestAPIView,
+    DeleteAccountAPIView,
 )
 
 
@@ -29,4 +31,7 @@ urlpatterns = [
     path("logout/", LogoutAPIView.as_view(), name="logout"),
     path("token/refresh/", RefreshAccessTokenAPIView.as_view(), name="token_refresh_access"),
     path("token/create-refresh/", CreateRefreshTokenAPIView.as_view(), name="token_create_refresh"),
+    path("delete-account/", DeleteOTPRequestAPIView.as_view(), name="account_deletion_request_initiate"),
+    path("delete-account-confirm/", DeleteAccountAPIView.as_view(), name="account_deletion_request_confirm"),
+
 ]
