@@ -71,6 +71,25 @@ class AuthenticatedAPIView(APIView):
     permission_classes = [IsAuthenticated, HasRequiredScope]
     required_token_scope = SCOPE_FULL_AUTH
 
+class CheckUsernameAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        data = request.data
+        username = (data.get("username") or "").strip()
+        if not username:
+            return Response(
+                {"message": "username, email, first_name are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # if username exists
+        if User.objects.filter(username__iexact=username,is_deleted=False).exists():
+            return Response({"message": "Username is not available","available":False}, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response({"message": "Username is Available","available":True}, status=status.HTTP_200_OK)
+        
+
 
 class RegistrationAPIView(APIView):
     permission_classes = [AllowAny]
@@ -93,7 +112,7 @@ class RegistrationAPIView(APIView):
             )
 
         # if verified user with username exists
-        if User.objects.filter(username__iexact=username, is_email_verified=True).exists():
+        if User.objects.filter(username__iexact=username, is_email_verified=True, is_deleted=False).exists():
             return Response({"message": "Username is not available"}, status=status.HTTP_400_BAD_REQUEST)
         # existing verified user
         existing_verified_by_email = User.objects.filter(email=email, is_email_verified=True, is_deleted=False).first()
@@ -122,7 +141,7 @@ class RegistrationAPIView(APIView):
         if existing_unverified_by_email:
             # check if a person try to register with username exists with same email
             if (
-                User.objects.filter(username__iexact=username)
+                User.objects.filter(username__iexact=username,is_deleted=False)
                 .exclude(user_id=existing_unverified_by_email.user_id)
                 .exists()
             ):

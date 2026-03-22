@@ -15,10 +15,12 @@ from .views import (
     SetupPasswordAPIView,
     DeleteOTPRequestAPIView,
     DeleteAccountAPIView,
+    CheckUsernameAPIView,
 )
 
 
 urlpatterns = [
+    path("check_username/", CheckUsernameAPIView.as_view(), name="check_username"),
     path("register/", RegistrationAPIView.as_view(), name="register"),
     path("verify-email/", EmailVerificationAPIView.as_view(), name="verify_email"),
     path("setup-password/", SetupPasswordAPIView.as_view(), name="setup_password"),

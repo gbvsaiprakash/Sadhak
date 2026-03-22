@@ -89,7 +89,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     """Custom auth user compatible with Django auth/SimpleJWT token_blacklist."""
 
     user_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    username = models.CharField(max_length=30,unique=True)
+    username = models.CharField(max_length=30)
     email = models.EmailField(max_length=255)
     first_name = models.CharField(max_length=255)
     last_name = models.CharField(max_length=255, null=True, blank=True)
@@ -122,8 +122,8 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     objects = UserManager()
 
-    USERNAME_FIELD = "username"
-    REQUIRED_FIELDS = ["email", "first_name"]
+    USERNAME_FIELD = "user_id"
+    REQUIRED_FIELDS = ["username", "email", "first_name"]
 
     def add_role(self, role):
         self.roles |= role
