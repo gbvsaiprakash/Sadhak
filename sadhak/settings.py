@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist', # Simple JWT token blacklist app (for revoking refresh tokens)
     'corsheaders', # needed if frontend is on other origin
     'user_management',
+    'tracker',
 
 ]
 
