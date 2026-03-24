@@ -24,8 +24,10 @@ class MilestoneBaseAPIView(TrackerAPIViewMixin):
     def get_not_found_code(self):
         return "MILESTONE_NOT_FOUND"
 
-    def get_goal(self, goal_id):
+    def get_goal(self, goal_id, check_status=False):
         goal = Goal.objects.filter(id=self.kwargs["goal_id"], user=self.request.user).first()
+        if check_status and goal.status!="active":
+            return None
         if goal is None:
             return None
         return goal
@@ -45,7 +47,7 @@ class MilestoneListAPIView(MilestoneBaseAPIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request, goal_id):
-        goal = self.get_goal(goal_id)
+        goal = self.get_goal(goal_id,check_status=True)
         if goal is None:
             return self.finalize_error("GOAL_NOT_FOUND", "Goal was not found.")
         serializer = self.detail_serializer_class(data=request.data, context=self.get_serializer_context())
