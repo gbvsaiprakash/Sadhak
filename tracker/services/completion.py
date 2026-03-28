@@ -38,14 +38,14 @@ def check_goal_completion(goal):
             goal.save(update_fields=["status", "achieved_date", "updated_at"])
         return goal
 
-    active_milestones = list(goal.milestones.filter(status__in=ACTIVE_GOAL_STATUSES))
-    active_tasks = list(goal.tasks.filter(milestone__isnull=True, status__in=ACTIVE_TASK_STATUSES))
-    active_habits = list(goal.habits.filter(milestone__isnull=True, status__in=ACTIVE_HABIT_STATUSES))
+    milestones = list(goal.milestones.filter(is_deleted=False).exclude(status="cancelled"))
+    root_tasks = list(goal.tasks.filter(is_deled=False,milestone__isnull=True).exclude(status="cancelled"))
+    root_habits = list(goal.habits.filter(is_deleted=False,milestone__isnull=True).exclude(status="stopped"))
 
-    has_children = bool(active_milestones or active_tasks or active_habits)
-    milestones_complete = all(item.status == "completed" for item in active_milestones)
-    tasks_complete = all(task_is_complete(item) for item in active_tasks)
-    habits_complete = all(habit_is_complete_for_parent(item) for item in active_habits)
+    has_children = bool(milestones or root_tasks or root_habits)
+    milestones_complete = all(item.status == "completed" for item in milestones)
+    tasks_complete = all(task_is_complete(item) for item in root_tasks)
+    habits_complete = all(habit_is_complete_for_parent(item) for item in root_habits)
 
     if has_children and milestones_complete and tasks_complete and habits_complete:
         goal.status = "completed"
@@ -53,8 +53,26 @@ def check_goal_completion(goal):
     elif goal.status == "completed":
         goal.status = "active"
         goal.achieved_date = None
+
     goal.save(update_fields=["status", "achieved_date", "updated_at"])
     return goal
+    # active_milestones = list(goal.milestones.filter(status__in=ACTIVE_GOAL_STATUSES))
+    # active_tasks = list(goal.tasks.filter(milestone__isnull=True, status__in=ACTIVE_TASK_STATUSES))
+    # active_habits = list(goal.habits.filter(milestone__isnull=True, status__in=ACTIVE_HABIT_STATUSES))
+
+    # has_children = bool(active_milestones or active_tasks or active_habits)
+    # milestones_complete = all(item.status == "completed" for item in active_milestones)
+    # tasks_complete = all(task_is_complete(item) for item in active_tasks)
+    # habits_complete = all(habit_is_complete_for_parent(item) for item in active_habits)
+
+    # if has_children and milestones_complete and tasks_complete and habits_complete:
+    #     goal.status = "completed"
+    #     goal.achieved_date = goal.achieved_date or timezone.localdate()
+    # elif goal.status == "completed":
+    #     goal.status = "active"
+    #     goal.achieved_date = None
+    # goal.save(update_fields=["status", "achieved_date", "updated_at"])
+    # return goal
 
 
 def check_milestone_completion(milestone):
@@ -67,12 +85,12 @@ def check_milestone_completion(milestone):
         check_goal_completion(milestone.goal)
         return milestone
 
-    active_tasks = list(milestone.tasks.filter(status__in=ACTIVE_TASK_STATUSES))
-    active_habits = list(milestone.habits.filter(status__in=ACTIVE_HABIT_STATUSES))
-    has_children = bool(active_tasks or active_habits)
+    tasks = list(milestone.tasks.filter(is_deleted=False).exclude(status="cancelled"))
+    habits = list(milestone.habits.filter(is_deleted=False).exclude(status="stopped"))
 
-    tasks_complete = all(task_is_complete(item) for item in active_tasks)
-    habits_complete = all(habit_is_complete_for_parent(item) for item in active_habits)
+    has_children = bool(tasks or habits)
+    tasks_complete = all(task_is_complete(item) for item in tasks)
+    habits_complete = all(habit_is_complete_for_parent(item) for item in habits)
 
     if has_children and tasks_complete and habits_complete:
         milestone.status = "completed"
@@ -80,9 +98,26 @@ def check_milestone_completion(milestone):
     elif milestone.status == "completed":
         milestone.status = "active"
         milestone.achieved_date = None
+
     milestone.save(update_fields=["status", "achieved_date", "updated_at"])
     check_goal_completion(milestone.goal)
     return milestone
+    # active_tasks = list(milestone.tasks.filter(status__in=ACTIVE_TASK_STATUSES))
+    # active_habits = list(milestone.habits.filter(status__in=ACTIVE_HABIT_STATUSES))
+    # has_children = bool(active_tasks or active_habits)
+
+    # tasks_complete = all(task_is_complete(item) for item in active_tasks)
+    # habits_complete = all(habit_is_complete_for_parent(item) for item in active_habits)
+
+    # if has_children and tasks_complete and habits_complete:
+    #     milestone.status = "completed"
+    #     milestone.achieved_date = milestone.achieved_date or timezone.localdate()
+    # elif milestone.status == "completed":
+    #     milestone.status = "active"
+    #     milestone.achieved_date = None
+    # milestone.save(update_fields=["status", "achieved_date", "updated_at"])
+    # check_goal_completion(milestone.goal)
+    # return milestone
 
 
 def sync_task_status_from_occurrences(task):

@@ -85,7 +85,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         generate_occurrences(habit)
         if habit.milestone:
             check_milestone_completion(habit.milestone)
-        elif habit.goal:
+        if habit.goal:
             check_goal_completion(habit.goal)
         return habit
 
@@ -98,6 +98,6 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         regenerate_future_occurrences(habit)
         if habit.milestone:
             check_milestone_completion(habit.milestone)
-        elif habit.goal:
+        if habit.goal:
             check_goal_completion(habit.goal)
         return habit

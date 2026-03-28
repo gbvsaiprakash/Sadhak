@@ -13,6 +13,7 @@ class Milestone(UUIDTimeStampedModel):
     start_date = models.DateField()
     expected_achieved_date = models.DateField()
     achieved_date = models.DateField(blank=True, null=True)
+    is_deleted = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("start_date", "created_at")

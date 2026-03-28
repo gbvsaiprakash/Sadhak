@@ -21,6 +21,7 @@ class Habit(UUIDTimeStampedModel):
     start_date = models.DateField()
     end_date = models.DateField(blank=True, null=True)
     is_habit = models.BooleanField(default=True, editable=False)
+    is_deleted = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("start_date", "time_of_day", "created_at")

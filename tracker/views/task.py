@@ -8,7 +8,7 @@ from tracker.views.mixins import TrackerAPIViewMixin
 
 
 class TaskBaseAPIView(TrackerAPIViewMixin):
-    queryset = Task.objects.all().select_related("goal", "milestone", "user").prefetch_related("occurrences")
+    queryset = Task.objects.filter(is_deleted=False).select_related("goal", "milestone", "user").prefetch_related("occurrences")
     list_serializer_class = TaskListSerializer
     detail_serializer_class = TaskDetailSerializer
 
@@ -29,8 +29,18 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
         task.save(update_fields=["status", "updated_at"])
         if task.milestone:
             check_milestone_completion(task.milestone)
-        elif task.goal:
+        if task.goal:
             check_goal_completion(task.goal)
+    
+    def delete_task(self, task):
+        task.is_deleted = "True"
+        task.save(update_fields=["is_deleted", "updated_at"])
+        if task.milestone:
+            check_milestone_completion(task.milestone)
+        if task.goal:
+            check_goal_completion(task.goal)
+    
+
 
 
 class TaskListAPIView(TaskBaseAPIView):
@@ -72,8 +82,23 @@ class TaskDetailAPIView(TaskBaseAPIView):
 
     def delete(self, request, pk):
         task = self.get_task(pk)
-        self.cancel_task(task)
+        self.delete_task(task)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+class TaskCancelAPIView(TaskBaseAPIView):
+    def put(self, request, pk):
+        task = self.get_task(pk)
+        self.cancel_task(task)
+
+        if task.milestone:
+            check_milestone_completion(task.milestone)
+        if task.goal:
+            check_goal_completion(task.goal)
+
+        return Response(
+            self.detail_serializer_class(task, context=self.get_serializer_context()).data,
+            status=status.HTTP_200_OK,
+        )
 
 
 class TaskCompleteAPIView(TaskBaseAPIView):
@@ -92,7 +117,7 @@ class TaskCompleteAPIView(TaskBaseAPIView):
             task.save(update_fields=["status", "updated_at"])
         if task.milestone:
             check_milestone_completion(task.milestone)
-        elif task.goal:
+        if task.goal:
             check_goal_completion(task.goal)
         return Response(self.detail_serializer_class(task, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
 
@@ -107,6 +132,6 @@ class TaskSkipAPIView(TaskBaseAPIView):
         sync_task_status_from_occurrences(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
-        elif task.goal:
+        if task.goal:
             check_goal_completion(task.goal)
         return Response(self.detail_serializer_class(task, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)

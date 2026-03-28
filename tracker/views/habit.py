@@ -8,7 +8,7 @@ from tracker.views.mixins import TrackerAPIViewMixin
 
 
 class HabitBaseAPIView(TrackerAPIViewMixin):
-    queryset = Habit.objects.all().select_related("goal", "milestone", "user").prefetch_related("occurrences")
+    queryset = Habit.objects.filter(is_deleted=False).select_related("goal", "milestone", "user").prefetch_related("occurrences")
     list_serializer_class = HabitListSerializer
     detail_serializer_class = HabitDetailSerializer
 
@@ -24,12 +24,13 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
     def get_habit(self, pk):
         return self.get_object(self.get_queryset(), id=pk)
 
-    def stop_habit(self, habit):
+    def stop_habit(self, habit, is_deleted=False):
         habit.status = "stopped"
-        habit.save(update_fields=["status", "updated_at"])
+        habit.is_deleted = is_deleted
+        habit.save(update_fields=["status", "is_deleted", "updated_at"])
         if habit.milestone:
             check_milestone_completion(habit.milestone)
-        elif habit.goal:
+        if habit.goal:
             check_goal_completion(habit.goal)
 
 
@@ -99,6 +100,15 @@ class HabitStopAPIView(HabitBaseAPIView):
         self.stop_habit(habit)
         return Response(self.detail_serializer_class(habit, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
 
+class HabitCancelAPIView(HabitBaseAPIView):
+    def put(self, request, pk):
+        habit = self.get_habit(pk)
+        self.stop_habit(habit, is_deleted=True)
+
+        return Response(
+            self.detail_serializer_class(habit, context=self.get_serializer_context()).data,
+            status=status.HTTP_200_OK,
+        )
 
 class HabitLogAPIView(HabitBaseAPIView):
     def patch(self, request, pk):
@@ -110,6 +120,6 @@ class HabitLogAPIView(HabitBaseAPIView):
         mark_occurrence(habit, occurrence, status_value, notes=request.data.get("notes"))
         if habit.milestone:
             check_milestone_completion(habit.milestone)
-        elif habit.goal:
+        if habit.goal:
             check_goal_completion(habit.goal)
         return Response(self.detail_serializer_class(habit, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)

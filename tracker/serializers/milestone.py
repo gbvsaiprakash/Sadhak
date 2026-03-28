@@ -19,7 +19,7 @@ class MilestoneListSerializer(serializers.ModelSerializer):
         fields = ("id", "title", "status", "start_date", "expected_achieved_date", "completion_percentage", "is_overdue")
 
     def get_completion_percentage(self, obj):
-        active_children = list(obj.tasks.exclude(status="cancelled")) + list(obj.habits.exclude(status="stopped"))
+        active_children = list(obj.tasks.filter(is_deleted=False).exclude(status="cancelled")) + list(obj.habits.exclude(status="stopped"))
         if not active_children:
             return 0
         completed = sum(1 for item in active_children if item.status in {"completed", "stopped"})
@@ -66,8 +66,8 @@ class MilestoneDetailSerializer(MilestoneListSerializer):
         if validated_data.get("override_completed") and instance.status in {"completed", "cancelled"}:
             raise_tracker_error("OVERRIDE_CONFLICT", "Override cannot be applied to this milestone.")
         if validated_data.get("status") == "completed" and not validated_data.get("override_completed", instance.override_completed):
-            has_children = instance.tasks.exclude(status="cancelled").exists() or instance.habits.exclude(status="stopped").exists()
-            unresolved_children = instance.tasks.filter(status__in={"pending", "in_progress"}).exists() or instance.habits.filter(status__in={"active", "paused"}).exists()
+            has_children = instance.tasks.filter(is_deleted=False).exclude(status="cancelled").exists() or instance.habits.exclude(status="stopped").exists()
+            unresolved_children = instance.tasks.filter(is_deleted=False,status__in={"pending", "in_progress"}).exists() or instance.habits.filter(status__in={"active", "paused"}).exists()
             if (not has_children) or unresolved_children:
                 raise_tracker_error(
                     "COMPLETION_BLOCKED",

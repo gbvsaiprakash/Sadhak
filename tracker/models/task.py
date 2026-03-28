@@ -21,6 +21,7 @@ class Task(UUIDTimeStampedModel):
     day_of_month = models.PositiveSmallIntegerField(blank=True, null=True)
     interval_hours = models.PositiveSmallIntegerField(blank=True, null=True)
     is_habit = models.BooleanField(default=False, editable=False)
+    is_deleted = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("start_date", "time_of_day", "created_at")

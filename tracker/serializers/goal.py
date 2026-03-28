@@ -17,13 +17,13 @@ class GoalListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Goal
-        fields = ("id", "section", "title", "status", "start_date", "expected_end_date", "completion_percentage", "is_overdue")
+        fields = ("id", "section", "title", "status", "start_date", "expected_end_date", "completion_percentage", "is_overdue", "override_completed")
 
     def get_completion_percentage(self, obj):
         active_children = (
-            list(obj.milestones.exclude(status="cancelled"))
-            + list(obj.tasks.filter(milestone__isnull=True).exclude(status="cancelled"))
-            + list(obj.habits.filter(milestone__isnull=True).exclude(status="stopped"))
+            list(obj.milestones.filter(is_deleted=False).exclude(status="cancelled"))
+            + list(obj.tasks.filter(is_deleted=False,milestone__isnull=True).exclude(status="cancelled"))
+            + list(obj.habits.filter(is_deleted=False,milestone__isnull=True).exclude(status="stopped"))
         )
         if not active_children:
             return 0
@@ -38,6 +38,8 @@ class GoalDetailSerializer(GoalListSerializer):
     milestones = MilestoneListSerializer(many=True, read_only=True)
     tasks = serializers.SerializerMethodField()
     habits = serializers.SerializerMethodField()
+    all_tasks = serializers.SerializerMethodField()
+    all_habits = serializers.SerializerMethodField()
 
     class Meta(GoalListSerializer.Meta):
         fields = (
@@ -56,17 +58,27 @@ class GoalDetailSerializer(GoalListSerializer):
             "milestones",
             "tasks",
             "habits",
+            "all_tasks",
+            "all_habits",
             "created_at",
             "updated_at",
         )
         read_only_fields = ("user", "achieved_date", "created_at", "updated_at")
 
     def get_tasks(self, obj):
-        queryset = obj.tasks.filter(milestone__isnull=True)
+        queryset = obj.tasks.filter(is_deleted=False,milestone__isnull=True)
         return TaskListSerializer(queryset, many=True, context=self.context).data
 
     def get_habits(self, obj):
-        queryset = obj.habits.filter(milestone__isnull=True)
+        queryset = obj.habits.filter(is_deleted=False,milestone__isnull=True)
+        return HabitListSerializer(queryset, many=True, context=self.context).data
+
+    def get_all_tasks(self, obj):
+        queryset = obj.tasks.filter(is_deleted=False)
+        return TaskListSerializer(queryset, many=True, context=self.context).data
+
+    def get_all_habits(self, obj):
+        queryset = obj.habits.filter(is_deleted=False)
         return HabitListSerializer(queryset, many=True, context=self.context).data
 
     @transaction.atomic
@@ -82,14 +94,14 @@ class GoalDetailSerializer(GoalListSerializer):
             raise_tracker_error("OVERRIDE_CONFLICT", "Override cannot be applied to this goal.")
         if validated_data.get("status") == "completed" and not validated_data.get("override_completed", instance.override_completed):
             has_children = (
-                instance.milestones.exclude(status="cancelled").exists()
-                or instance.tasks.filter(milestone__isnull=True).exclude(status="cancelled").exists()
-                or instance.habits.filter(milestone__isnull=True).exclude(status="stopped").exists()
+                instance.milestones.filter(is_deleted=False).exclude(status="cancelled").exists()
+                or instance.tasks.filter(is_deleted=False,milestone__isnull=True).exclude(status="cancelled").exists()
+                or instance.habits.filter(is_deleted=False,milestone__isnull=True).exclude(status="stopped").exists()
             )
             unresolved_children = (
-                instance.milestones.filter(status="active").exists()
-                or instance.tasks.filter(milestone__isnull=True, status__in={"pending", "in_progress"}).exists()
-                or instance.habits.filter(milestone__isnull=True, status__in={"active", "paused"}).exists()
+                instance.milestones.filter(is_deleted=False,status="active").exists()
+                or instance.tasks.filter(is_deleted=False,milestone__isnull=True, status__in={"pending", "in_progress"}).exists()
+                or instance.habits.filter(is_deleted=False,milestone__isnull=True, status__in={"active", "paused"}).exists()
             )
             if (not has_children) or unresolved_children:
                 raise_tracker_error(

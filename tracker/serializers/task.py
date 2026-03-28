@@ -88,7 +88,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         generate_occurrences(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
-        elif task.goal:
+        if task.goal:
             check_goal_completion(task.goal)
         return task
 
@@ -101,6 +101,6 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         regenerate_future_occurrences(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
-        elif task.goal:
+        if task.goal:
             check_goal_completion(task.goal)
         return task

@@ -15,6 +15,7 @@ class Goal(UUIDTimeStampedModel):
     start_date = models.DateField()
     expected_end_date = models.DateField(blank=True, null=True)
     achieved_date = models.DateField(blank=True, null=True)
+    is_deleted = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("-created_at",)

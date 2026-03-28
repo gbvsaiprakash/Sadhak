@@ -3,12 +3,12 @@ from rest_framework.response import Response
 
 from tracker.models import Goal, Milestone
 from tracker.serializers import MilestoneDetailSerializer, MilestoneListSerializer
-from tracker.services import cascade_milestone_cancel
+from tracker.services import cascade_milestone_cancel, cascade_milestone_delete
 from tracker.views.mixins import TrackerAPIViewMixin
 
 
 class MilestoneBaseAPIView(TrackerAPIViewMixin):
-    queryset = Milestone.objects.all().select_related("goal", "goal__user").prefetch_related("tasks", "habits")
+    queryset = Milestone.objects.filter(is_deleted=False).select_related("goal", "goal__user").prefetch_related("tasks", "habits")
     list_serializer_class = MilestoneListSerializer
     detail_serializer_class = MilestoneDetailSerializer
 
@@ -26,7 +26,7 @@ class MilestoneBaseAPIView(TrackerAPIViewMixin):
 
     def get_goal(self, goal_id, check_status=False):
         goal = Goal.objects.filter(id=self.kwargs["goal_id"], user=self.request.user).first()
-        if check_status and goal.status!="active":
+        if check_status and (goal.status == "cancelled" or goal.override_completed):
             return None
         if goal is None:
             return None
@@ -80,5 +80,15 @@ class MilestoneDetailAPIView(MilestoneBaseAPIView):
 
     def delete(self, request, goal_id, pk):
         milestone = self.get_milestone(goal_id, pk)
-        cascade_milestone_cancel(milestone)
+        cascade_milestone_delete(milestone)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+class MilestoneCancelAPIView(MilestoneBaseAPIView):
+    def put(self, request, goal_id, pk):
+        milestone = self.get_milestone(goal_id, pk)
+        cascade_milestone_cancel(milestone)
+        return Response(
+            self.detail_serializer_class(milestone, context=self.get_serializer_context()).data,
+            status=status.HTTP_200_OK,
+        )
+

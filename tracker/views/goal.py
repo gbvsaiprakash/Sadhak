@@ -3,12 +3,12 @@ from rest_framework.response import Response
 
 from tracker.models import Goal
 from tracker.serializers import GoalDetailSerializer, GoalListSerializer
-from tracker.services import cascade_goal_cancel
+from tracker.services import cascade_goal_cancel, cascade_goal_delete
 from tracker.views.mixins import TrackerAPIViewMixin
 
 
 class GoalBaseAPIView(TrackerAPIViewMixin):
-    queryset = Goal.objects.all().select_related("user").prefetch_related("milestones", "tasks", "habits")
+    queryset = Goal.objects.filter(is_deleted=False).select_related("user").prefetch_related("milestones", "tasks", "habits")
     list_serializer_class = GoalListSerializer
     detail_serializer_class = GoalDetailSerializer
 
@@ -57,6 +57,8 @@ class GoalDetailAPIView(GoalBaseAPIView):
 
     def patch(self, request, pk):
         goal = self.get_goal(pk)
+        if goal.override_completed or goal.status == "cancelled":
+            return Response({"error":"Cannot modify Cancelled or Overriden Goals"},status=status.HTTP_400_BAD_REQUEST)
         serializer = self.get_serializer(goal, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -64,5 +66,14 @@ class GoalDetailAPIView(GoalBaseAPIView):
 
     def delete(self, request, pk):
         goal = self.get_goal(pk)
-        cascade_goal_cancel(goal)
+        cascade_goal_delete(goal)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+class GoalCancelAPIView(GoalBaseAPIView):
+    def put(self, request, pk):
+        goal = self.get_goal(pk)
+        cascade_goal_cancel(goal)
+        return Response(
+            self.detail_serializer_class(goal, context=self.get_serializer_context()).data,
+            status=status.HTTP_200_OK,
+        )

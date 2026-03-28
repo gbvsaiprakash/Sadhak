@@ -10,18 +10,16 @@ class TrackerValidationMixin:
         goal = attrs.get("goal", getattr(self.instance, "goal", None))
         milestone = attrs.get("milestone", getattr(self.instance, "milestone", None))
         section = attrs.get("section", getattr(self.instance, "section", None))
-        if goal and milestone:
-            raise_tracker_error(
-                "INVALID_PARENT",
-                "An item cannot belong to both a goal and a milestone.",
-                details={"goal_id": str(goal.id), "milestone_id": str(milestone.id)},
-            )
         if milestone and goal and milestone.goal_id != goal.id:
             raise_tracker_error(
                 "INVALID_PARENT",
                 "Milestone does not belong to the selected goal.",
                 details={"goal_id": str(goal.id), "milestone_goal_id": str(milestone.goal_id)},
             )
+        if milestone and not goal:
+            goal = milestone.goal
+            attrs["goal"] = goal
+        
         parent_goal = milestone.goal if milestone else goal
         if parent_goal and section and parent_goal.section != section:
             raise_tracker_error(
