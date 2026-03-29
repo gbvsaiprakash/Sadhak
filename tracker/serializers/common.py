@@ -5,6 +5,46 @@ from tracker.constants import ACTIVE_HABIT_STATUSES, ACTIVE_TASK_STATUSES
 from tracker.exceptions import raise_tracker_error
 
 
+def _get_occurrence_units(tasks, habits):
+    """
+    Given a queryset of tasks and habits (already prefetched with occurrences),
+    returns (total_units, completed_units) based on occurrence-level granularity.
+    """
+    total_units = 0
+    completed_units = 0
+
+    for task in tasks:
+        occurrences = task.occurrences.all()
+        if task.frequency_type == "once":
+            total_units += 1
+            if task.status in {"completed", "skipped"}:
+                completed_units += 1
+        elif occurrences:
+            total_units += len(occurrences)
+            completed_units += sum(
+                1 for o in occurrences
+                if o.status in {"completed", "skipped"}
+            )
+        else:
+            # recurring task with no occurrences yet — 1 pending unit
+            total_units += 1
+
+    for habit in habits:
+        occurrences = habit.occurrences.all()
+        if occurrences:
+            total_units += len(occurrences)
+            completed_units += sum(
+                1 for o in occurrences
+                if o.status in {"completed", "skipped"}
+            )
+        else:
+            # habit exists but no occurrences yet — 1 pending unit
+            total_units += 1
+            if habit.status == "completed":
+                completed_units += 1
+
+    return total_units, completed_units
+
 class TrackerValidationMixin:
     def validate_parent_assignment(self, attrs):
         goal = attrs.get("goal", getattr(self.instance, "goal", None))

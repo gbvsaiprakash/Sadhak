@@ -39,7 +39,7 @@ def check_goal_completion(goal):
         return goal
 
     milestones = list(goal.milestones.filter(is_deleted=False).exclude(status="cancelled"))
-    root_tasks = list(goal.tasks.filter(is_deled=False,milestone__isnull=True).exclude(status="cancelled"))
+    root_tasks = list(goal.tasks.filter(is_deleted=False,milestone__isnull=True).exclude(status="cancelled"))
     root_habits = list(goal.habits.filter(is_deleted=False,milestone__isnull=True).exclude(status="stopped"))
 
     has_children = bool(milestones or root_tasks or root_habits)

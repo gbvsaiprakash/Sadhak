@@ -4,7 +4,7 @@ from rest_framework import serializers
 
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Milestone
-from tracker.serializers.common import is_overdue
+from tracker.serializers.common import is_overdue, _get_occurrence_units
 from tracker.serializers.task import TaskListSerializer
 from tracker.serializers.habit import HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion
@@ -19,19 +19,32 @@ class MilestoneListSerializer(serializers.ModelSerializer):
         fields = ("id", "title", "status", "start_date", "expected_achieved_date", "completion_percentage", "is_overdue")
 
     def get_completion_percentage(self, obj):
-        active_children = list(obj.tasks.filter(is_deleted=False).exclude(status="cancelled")) + list(obj.habits.exclude(status="stopped"))
-        if not active_children:
+        tasks = obj.tasks.filter(
+            is_deleted=False
+        ).exclude(
+            status="cancelled"
+        ).prefetch_related('occurrences')
+
+        habits = obj.habits.filter(
+            is_deleted=False
+        ).exclude(
+            status__in={"stopped", "cancelled"}
+        ).prefetch_related('occurrences')
+
+        total_units, completed_units = _get_occurrence_units(tasks, habits)
+
+        if total_units == 0:
             return 0
-        completed = sum(1 for item in active_children if item.status in {"completed", "stopped"})
-        return int((completed / len(active_children)) * 100)
+
+        return int((completed_units / total_units) * 100)
 
     def get_is_overdue(self, obj):
         return is_overdue(obj)
 
 
 class MilestoneDetailSerializer(MilestoneListSerializer):
-    tasks = TaskListSerializer(many=True, read_only=True)
-    habits = HabitListSerializer(many=True, read_only=True)
+    tasks = serializers.SerializerMethodField()
+    habits = serializers.SerializerMethodField()
 
     class Meta(MilestoneListSerializer.Meta):
         fields = (
@@ -80,3 +93,11 @@ class MilestoneDetailSerializer(MilestoneListSerializer):
             milestone.save(update_fields=["status", "achieved_date", "updated_at"])
         check_milestone_completion(milestone)
         return milestone
+    
+    def get_tasks(self, obj):
+        queryset = obj.tasks.filter(is_deleted=False)
+        return TaskListSerializer(queryset, many=True, context=self.context).data
+
+    def get_habits(self, obj):
+        queryset = obj.habits.filter(is_deleted=False)
+        return HabitListSerializer(queryset, many=True, context=self.context).data

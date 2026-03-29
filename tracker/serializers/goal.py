@@ -4,7 +4,7 @@ from rest_framework import serializers
 
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Goal
-from tracker.serializers.common import is_overdue
+from tracker.serializers.common import is_overdue, _get_occurrence_units
 from tracker.serializers.habit import HabitListSerializer
 from tracker.serializers.milestone import MilestoneListSerializer
 from tracker.serializers.task import TaskListSerializer
@@ -20,15 +20,58 @@ class GoalListSerializer(serializers.ModelSerializer):
         fields = ("id", "section", "title", "status", "start_date", "expected_end_date", "completion_percentage", "is_overdue", "override_completed")
 
     def get_completion_percentage(self, obj):
-        active_children = (
-            list(obj.milestones.filter(is_deleted=False).exclude(status="cancelled"))
-            + list(obj.tasks.filter(is_deleted=False,milestone__isnull=True).exclude(status="cancelled"))
-            + list(obj.habits.filter(is_deleted=False,milestone__isnull=True).exclude(status="stopped"))
+        total_units = 0
+        completed_units = 0
+
+        # --- Milestones ---
+        milestones = obj.milestones.filter(
+            is_deleted=False
+        ).exclude(
+            status__in={"cancelled"}
+        ).prefetch_related(
+            'tasks__occurrences',
+            'habits__occurrences'
         )
-        if not active_children:
+
+        for milestone in milestones:
+            m_total, m_completed = _get_occurrence_units(
+                milestone.tasks.filter(is_deleted=False).exclude(status="cancelled").prefetch_related('occurrences'),
+                milestone.habits.filter(is_deleted=False).exclude(status__in={"stopped", "cancelled"}).prefetch_related('occurrences')
+            )
+            if m_total == 0:
+                # milestone has no children — counts as 1 unit,
+                # completed only if overridden or manually completed
+                total_units += 1
+                if milestone.status in {"completed", "overridden"}:
+                    completed_units += 1
+            else:
+                total_units += m_total
+                completed_units += m_completed
+
+        # --- Root-level Tasks (not under any milestone) ---
+        root_tasks = obj.tasks.filter(
+            is_deleted=False,
+            milestone__isnull=True
+        ).exclude(
+            status="cancelled"
+        ).prefetch_related('occurrences')
+
+        # --- Root-level Habits (not under any milestone) ---
+        root_habits = obj.habits.filter(
+            is_deleted=False,
+            milestone__isnull=True
+        ).exclude(
+            status__in={"stopped", "cancelled"}
+        ).prefetch_related('occurrences')
+
+        r_total, r_completed = _get_occurrence_units(root_tasks, root_habits)
+        total_units += r_total
+        completed_units += r_completed
+
+        if total_units == 0:
             return 0
-        completed = sum(1 for item in active_children if item.status in {"completed", "stopped"})
-        return int((completed / len(active_children)) * 100)
+
+        return int((completed_units / total_units) * 100)
 
     def get_is_overdue(self, obj):
         return is_overdue(obj)
