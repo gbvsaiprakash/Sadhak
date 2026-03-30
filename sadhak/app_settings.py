@@ -5,7 +5,6 @@ import os
 load_dotenv()
 
 # Access the variables
-database_url = os.getenv("DATABASE_URL")
 access_token_seconds = int(os.getenv('ACCESS_TOKEN_TTL_SECONDS'))
 refresh_token_seconds = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS"))
 access_token_cookie = os.getenv("ACCESS_TOKEN_COOKIE")

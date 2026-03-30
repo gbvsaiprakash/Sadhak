@@ -29,7 +29,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False if os.environ.get("DEBUG",True) in ["False",False] else True
+DEBUG = False if os.environ.get("DEBUG",True) in ["False", "false", False] else True
 
 ALLOWED_HOSTS = ["*"]
 
@@ -99,10 +99,10 @@ WSGI_APPLICATION = 'sadhak.wsgi.application'
 DATABASES = {
     "default": {
         "ENGINE": os.getenv("DB_ENGINE"),
-        "NAME": os.getenv("DATABASE_NAME"),
-        "USER": os.getenv("DATABASE_USER"),
-        "PASSWORD": os.getenv("DATABASE_PASSWORD"),
-        "HOST": os.getenv("DB_HOST"),
+        "NAME": os.getenv("POSTGRES_DB"),
+        "USER": os.getenv("POSTGRES_USER"),
+        "PASSWORD": os.getenv("POSTGRES_PASSWORD"),
+        "HOST": os.getenv("DB_HOST", "localhost"),
         "PORT": os.getenv("DB_PORT"),
     }
 }
