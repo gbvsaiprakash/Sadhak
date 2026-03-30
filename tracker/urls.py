@@ -1,6 +1,9 @@
 from django.urls import path
 
 from tracker.views import (
+    CalendarCombinedAPIView,
+    CalendarHabitAPIView,
+    CalendarTaskAPIView,
     GoalDetailAPIView,
     GoalListAPIView,
     HabitDetailAPIView,
@@ -19,6 +22,10 @@ from tracker.views import (
     MilestoneCancelAPIView,
     TaskCancelAPIView,
     HabitCancelAPIView,
+    TaskOccurrenceContextAPIView,
+    TaskOccurrenceListAPIView,
+    HabitOccurrenceContextAPIView,
+    HabitOccurrenceListAPIView,
 )
 
 urlpatterns = [
@@ -40,4 +47,15 @@ urlpatterns = [
     path("habits/<uuid:pk>/stop/", HabitStopAPIView.as_view(), name="tracker-habit-stop"),
     path("habits/<uuid:pk>/log/", HabitLogAPIView.as_view(), name="tracker-habit-log"),
     path("habits/<uuid:pk>/cancel/", HabitCancelAPIView.as_view(), name="tracker-habit-cancel"),
+
+    # Occurrence context
+    path("tasks/<uuid:task_id>/occurrences/", TaskOccurrenceListAPIView.as_view(), name="tracker-task-occurrences"),
+    path("tasks/<uuid:task_id>/occurrences/<uuid:pk>/context/", TaskOccurrenceContextAPIView.as_view(), name="tracker-task-occurrence-context"),
+    path("habits/<uuid:habit_id>/occurrences/", HabitOccurrenceListAPIView.as_view(), name="tracker-habit-occurrences"),
+    path("habits/<uuid:habit_id>/occurrences/<uuid:pk>/context/", HabitOccurrenceContextAPIView.as_view(), name="tracker-habit-occurrence-context"),
+
+    # Calendar
+    path("calendar/tasks/", CalendarTaskAPIView.as_view(), name="tracker-calendar-tasks"),
+    path("calendar/habits/", CalendarHabitAPIView.as_view(), name="tracker-calendar-habits"),
+    path("calendar/", CalendarCombinedAPIView.as_view(), name="tracker-calendar-combined"),
 ]

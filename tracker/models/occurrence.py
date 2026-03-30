@@ -18,6 +18,9 @@ class TaskOccurrence(UUIDTimeStampedModel):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     completed_at = models.DateTimeField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
+    context_title = models.CharField(max_length=255, blank=True, null=True)
+    context_description = models.TextField(blank=True, null=True)
+    context_checklist = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ("scheduled_date", "scheduled_time", "created_at")

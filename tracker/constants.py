@@ -34,9 +34,16 @@ FREQUENCY_TYPE_CHOICES = (
     ("weekly", "Weekly"),
     ("monthly", "Monthly"),
     ("hourly", "Hourly"),
+    ("custom", "Custom"),
 )
 
-RECURRING_FREQUENCIES = {"daily", "weekly", "monthly", "hourly"}
+FREQUENCY_PERIOD_CHOICES = (
+    ("day", "Day"),
+    ("week", "Week"),
+    ("month", "Month"),
+)
+
+RECURRING_FREQUENCIES = {"daily", "weekly", "monthly", "hourly", "custom"}
 ACTIVE_GOAL_STATUSES = {"active"}
 ACTIVE_TASK_STATUSES = {"pending", "in_progress"}
 ACTIVE_HABIT_STATUSES = {"active", "paused"}

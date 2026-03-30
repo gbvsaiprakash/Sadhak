@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.db import models
 
-from tracker.constants import FREQUENCY_TYPE_CHOICES, SECTION_CHOICES, TASK_STATUS_CHOICES
+from tracker.constants import FREQUENCY_PERIOD_CHOICES, FREQUENCY_TYPE_CHOICES, SECTION_CHOICES, TASK_STATUS_CHOICES
 from tracker.models.base import UUIDTimeStampedModel
 
 
@@ -14,9 +14,14 @@ class Task(UUIDTimeStampedModel):
     description = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=TASK_STATUS_CHOICES, default="pending")
     frequency_type = models.CharField(max_length=20, choices=FREQUENCY_TYPE_CHOICES, default="once")
+    frequency_interval = models.IntegerField(default=1)
+    frequency_days = models.JSONField(default=list, blank=True)
+    frequency_times_per_period = models.PositiveIntegerField(blank=True, null=True)
+    frequency_period = models.CharField(max_length=10, choices=FREQUENCY_PERIOD_CHOICES, blank=True, null=True)
     start_date = models.DateField()
     end_date = models.DateField(blank=True, null=True)
-    time_of_day = models.TimeField(blank=True, null=True)
+    start_time = models.TimeField()
+    end_time = models.TimeField(blank=True, null=True)
     day_of_week = models.PositiveSmallIntegerField(blank=True, null=True)
     day_of_month = models.PositiveSmallIntegerField(blank=True, null=True)
     interval_hours = models.PositiveSmallIntegerField(blank=True, null=True)
@@ -24,7 +29,7 @@ class Task(UUIDTimeStampedModel):
     is_deleted = models.BooleanField(default=False)
 
     class Meta:
-        ordering = ("start_date", "time_of_day", "created_at")
+        ordering = ("start_date", "start_time", "created_at")
         indexes = [
             models.Index(fields=["user", "status", "section"]),
             models.Index(fields=["goal", "milestone"]),
