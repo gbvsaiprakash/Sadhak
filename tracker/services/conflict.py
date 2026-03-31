@@ -49,7 +49,10 @@ def check_time_conflict(user, instance, scheduled_date, start_time, end_time, ex
         )
 
     if exclude_id:
-        qs = qs.exclude(id=exclude_id)
+        if getattr(instance, "is_habit", False):
+            qs = qs.exclude(habit_id=exclude_id)
+        else:
+            qs = qs.exclude(task_id=exclude_id)
 
     for occ in qs:
         parent = occ.task or occ.habit
@@ -101,4 +104,5 @@ def check_entity_schedule_conflicts(user, entity, from_date=None, to_date=None):
     for scheduled_date in date_iter:
         for start_t in _generate_times_for_date(entity, scheduled_date):
             end_t = _add_duration(start_t, duration)
-            check_time_conflict(user, entity, scheduled_date, start_t, end_t)
+            check_time_conflict(user, entity, scheduled_date, start_t, end_t, exclude_id=exclude_id)
+

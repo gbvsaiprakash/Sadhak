@@ -180,7 +180,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             ):
                 from_date = max(today, old_end_date + timedelta(days=1))
                 to_date = task.end_date
-            check_entity_schedule_conflicts(task.user, task, from_date=from_date, to_date=to_date)
+            check_entity_schedule_conflicts(task.user, task, from_date=from_date, to_date=to_date, exclude_id=task.id)
             regenerate_future_occurrences(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
