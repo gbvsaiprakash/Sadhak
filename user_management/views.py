@@ -21,7 +21,7 @@ from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from django.middleware.csrf import get_token
 from user_management.emails import send_email,account_registration_template_html,password_reset_template_html,account_deletion_template_html
-
+import os
 from .authentication import TokenCookieAuthentication
 from .throttles import (
     ForgotPasswordIdentifierRateThrottle,
@@ -981,7 +981,7 @@ def _set_cookie(response, key, token, max_age,path):
         max_age=max_age,
         httponly=True,
         secure=not settings.DEBUG,
-        samesite="Lax",
+        samesite=os.getenv("SAME_SITE_COOKIE"),
         path=path or "/",
     )
 
