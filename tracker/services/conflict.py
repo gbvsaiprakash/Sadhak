@@ -76,7 +76,7 @@ def check_time_conflict(user, instance, scheduled_date, start_time, end_time, ex
             )
 
 
-def check_entity_schedule_conflicts(user, entity, from_date=None, to_date=None):
+def check_entity_schedule_conflicts(user, entity, from_date=None, to_date=None, exclude_id=None):
     """
     Checks the occurrences that would be generated for entity (without creating them).
     Returns None if no conflicts; raises TIME_COLLISION otherwise (first conflict only).

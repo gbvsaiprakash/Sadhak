@@ -16,7 +16,7 @@ class MilestoneListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Milestone
-        fields = ("id", "title", "status", "start_date", "expected_achieved_date", "completion_percentage", "is_overdue")
+        fields = ("id", "title", "status", "start_date", "expected_achieved_date", "completion_percentage", "is_overdue", "is_deleted")
 
     def get_completion_percentage(self, obj):
         tasks = obj.tasks.filter(
