@@ -103,10 +103,19 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
 
     def validate(self, attrs):
         self.validate_parent_assignment(attrs)
+        self.validate_active_parents(attrs)
         self.validate_frequency(attrs, require_end_date=True)
         self.validate_time_window(attrs)
         return attrs
 
+    def validate_active_parents(self, attrs):
+        milestone = attrs.get("milestone")
+        if milestone and milestone.status == "cancelled":
+            raise_tracker_error("MILESTONE_CANCELLED", "Cannot assign a cancelled milestone to a task.")
+        goal = attrs.get("goal")
+        if goal and goal.status == "cancelled":
+            raise_tracker_error("GOAL_CANCELLED", "Cannot assign a cancelled goal to a task.")
+    
     def _default_end_time(self, start_time):
         dt = datetime.combine(date.today(), start_time) + timedelta(hours=1)
         if dt.date() != date.today():

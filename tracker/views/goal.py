@@ -66,13 +66,13 @@ class GoalDetailAPIView(GoalBaseAPIView):
 
     def delete(self, request, pk):
         goal = self.get_goal(pk)
-        cascade_goal_delete(goal)
+        cascade_goal_delete(goal,self.detail_serializer_class(goal, context=self.get_serializer_context()).data)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 class GoalCancelAPIView(GoalBaseAPIView):
     def put(self, request, pk):
         goal = self.get_goal(pk)
-        cascade_goal_cancel(goal)
+        cascade_goal_cancel(goal,self.detail_serializer_class(goal, context=self.get_serializer_context()).data)
         return Response(
             self.detail_serializer_class(goal, context=self.get_serializer_context()).data,
             status=status.HTTP_200_OK,

@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -28,6 +29,7 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
         habit.status = "stopped"
         habit.is_deleted = is_deleted
         habit.save(update_fields=["status", "is_deleted", "updated_at"])
+        TaskOccurrence.objects.filter(habit_id=habit.id).update(status="stopped", is_deleted=is_deleted, updated_at=timezone.now())
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:
@@ -73,7 +75,9 @@ class HabitDetailAPIView(HabitBaseAPIView):
 
     def delete(self, request, pk):
         habit = self.get_habit(pk)
-        self.stop_habit(habit)
+        self.stop_habit(habit, is_deleted=True)
+        habit.is_deleted = True
+        habit.save(update_fields=["is_deleted", "updated_at"])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -103,7 +107,7 @@ class HabitStopAPIView(HabitBaseAPIView):
 class HabitCancelAPIView(HabitBaseAPIView):
     def put(self, request, pk):
         habit = self.get_habit(pk)
-        self.stop_habit(habit, is_deleted=True)
+        self.stop_habit(habit)
 
         return Response(
             self.detail_serializer_class(habit, context=self.get_serializer_context()).data,
