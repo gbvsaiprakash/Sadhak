@@ -25,11 +25,25 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
     def get_habit(self, pk):
         return self.get_object(self.get_queryset(), id=pk)
 
+    # def stop_habit(self, habit, is_deleted=False):
+    #     habit.status = "stopped"
+    #     habit.is_deleted = is_deleted
+    #     habit.save(update_fields=["status", "is_deleted", "updated_at"])
+    #     TaskOccurrence.objects.filter(habit_id=habit.id).update(status="stopped", is_deleted=is_deleted, updated_at=timezone.now())
+    #     if habit.milestone:
+    #         check_milestone_completion(habit.milestone)
+    #     if habit.goal:
+    #         check_goal_completion(habit.goal)
+    
     def stop_habit(self, habit, is_deleted=False):
         habit.status = "stopped"
         habit.is_deleted = is_deleted
         habit.save(update_fields=["status", "is_deleted", "updated_at"])
-        TaskOccurrence.objects.filter(habit_id=habit.id).update(status="stopped", is_deleted=is_deleted, updated_at=timezone.now())
+        TaskOccurrence.objects.filter(habit_id=habit.id, status="pending").update(
+            status="stopped",
+            is_deleted=is_deleted,
+            updated_at=timezone.now(),
+        )
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:

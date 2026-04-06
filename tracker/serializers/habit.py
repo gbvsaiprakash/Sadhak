@@ -6,7 +6,7 @@ from rest_framework import serializers
 
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Habit, TaskOccurrence
-from tracker.serializers.common import TrackerValidationMixin, is_overdue, occurrence_stats
+from tracker.serializers.common import TrackerValidationMixin, occurrence_stats
 from tracker.services import (
     check_entity_schedule_conflicts,
     check_goal_completion,
@@ -62,6 +62,24 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     completed_occurrences = serializers.SerializerMethodField()
     missed_occurrences = serializers.SerializerMethodField()
 
+    SCHEDULE_FIELDS = {
+        "frequency_type",
+        "frequency_interval",
+        "frequency_days",
+        "frequency_times_per_period",
+        "frequency_period",
+        "start_date",
+        "end_date",
+        "start_time",
+        "end_time",
+        "day_of_week",
+        "day_of_month",
+        "interval_hours",
+    }
+
+    VALID_WEEKDAYS = {1,2,3,4,5,6,7} #{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    VALID_MONTHDAYS = set(range(1, 32))
+
     class Meta(HabitListSerializer.Meta):
         fields = (
             "id",
@@ -95,12 +113,133 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         )
         read_only_fields = ("user", "is_habit", "created_at", "updated_at")
 
+    def _effective(self, attrs, key, default=None):
+        if key in attrs:
+            return attrs.get(key)
+        if self.instance is not None:
+            return getattr(self.instance, key, default)
+        return default
+
+    def _normalize_days(self, raw_days, frequency_type):
+        if not raw_days:
+            return []
+        valid_values = {}
+        if frequency_type == "weekly":
+            valid_values = self.VALID_WEEKDAYS
+        elif frequency_type == "monthly":
+            valid_values = self.VALID_MONTHDAYS
+        days = [d for d in raw_days if isinstance(d, (int, str))]
+        invalid = [str(d) for d in days if d not in valid_values]
+        if invalid:
+            raise_tracker_error("INVALID_FREQUENCY_CONFIG", f"Invalid { 'weekday(s)' if frequency_type == "weekly" else 'monthday(s)' }: {', '.join(invalid)}")
+        return list(dict.fromkeys(days))
+
+    def _normalize_frequency_payload(self, attrs):
+        frequency_type = self._effective(attrs, "frequency_type")
+        if not frequency_type:
+            return
+
+        interval = self._effective(attrs, "frequency_interval")
+        raw_days = self._effective(attrs, "frequency_days", [])
+        days = self._normalize_days(raw_days, frequency_type)
+        times_per_period = self._effective(attrs, "frequency_times_per_period")
+        period = self._effective(attrs, "frequency_period")
+        day_of_month = days[0] if days and frequency_type == "monthly" else self._effective(attrs, "day_of_month")
+        interval_hours = self._effective(attrs, "interval_hours")
+
+        attrs["frequency_days"] = days
+
+        if frequency_type == "daily":
+            if not interval or int(interval) < 1:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Daily frequency requires frequency_interval >= 1.")
+            attrs["frequency_days"] = days
+            attrs["frequency_times_per_period"] = None
+            attrs["frequency_period"] = None
+            attrs["day_of_week"] = None
+            attrs["day_of_month"] = None
+            attrs["interval_hours"] = None
+            return
+
+        if frequency_type == "weekly":
+            if not interval or int(interval) < 1:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Weekly frequency requires frequency_interval >= 1.")
+            if not days:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Weekly frequency requires at least one day in frequency_days.")
+            attrs["day_of_week"] = days[0] if len(days) == 1 else None
+            attrs["frequency_days"] = days
+            attrs["frequency_times_per_period"] = None
+            attrs["frequency_period"] = None
+            attrs["day_of_month"] = None
+            attrs["interval_hours"] = None
+            return
+
+        if frequency_type == "monthly":
+            if not interval or int(interval) < 1:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Monthly frequency requires frequency_interval >= 1.")
+            if not day_of_month or int(day_of_month) < 1 or int(day_of_month) > 31:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Monthly frequency requires day_of_month between 1 and 31.")
+            attrs["frequency_days"] = days
+            attrs["frequency_times_per_period"] = None
+            attrs["frequency_period"] = None
+            attrs["day_of_week"] = None
+            attrs["interval_hours"] = None
+            return
+
+        if frequency_type == "hourly":
+            if not interval_hours or int(interval_hours) < 1:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Hourly frequency requires interval_hours >= 1.")
+            attrs["frequency_interval"] = int(interval_hours or 1)
+            attrs["frequency_days"] = days
+            attrs["frequency_times_per_period"] = None
+            attrs["frequency_period"] = None
+            attrs["day_of_week"] = None
+            attrs["day_of_month"] = None
+            return
+
+        if frequency_type == "custom":
+            if days:
+                raise_tracker_error(
+                    "INVALID_FREQUENCY_CONFIG",
+                    "Custom does not support weekday selection. Use weekly frequency for selected weekdays.",
+                )
+            times_mode = bool(times_per_period)
+            every_n_days_mode = bool(interval) and period == "day"
+
+            enabled_modes = sum([times_mode, every_n_days_mode])
+            if enabled_modes != 1:
+                raise_tracker_error(
+                    "INVALID_FREQUENCY_CONFIG",
+                    "Custom must use exactly one mode: N times per period OR every N days.",
+                )
+
+            if times_mode:
+                if int(times_per_period) < 1:
+                    raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_times_per_period must be >= 1.")
+                if period not in {"day", "week", "month"}:
+                    raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_period must be one of: day, week, month.")
+                attrs["frequency_interval"] = int(interval or 1)
+                attrs["day_of_week"] = None
+                attrs["day_of_month"] = None
+                attrs["interval_hours"] = None
+                return
+
+            if int(interval) < 1:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Every N days requires frequency_interval >= 1.")
+            attrs["frequency_period"] = "day"
+            attrs["frequency_times_per_period"] = None
+            attrs["frequency_days"] = days
+            attrs["day_of_week"] = None
+            attrs["day_of_month"] = None
+            attrs["interval_hours"] = None
+            return
+
     def validate(self, attrs):
         self.validate_parent_assignment(attrs)
         self.validate_active_parents(attrs)
+        self._normalize_frequency_payload(attrs)
         self.validate_frequency(attrs, require_end_date=False)
         self.validate_time_window(attrs)
-        if attrs.get("frequency_type") == "once":
+        if self._effective(attrs, "frequency_type") == "once":
             raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Habits must be recurring and cannot use once frequency.")
         return attrs
 
@@ -141,6 +280,24 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     def get_missed_occurrences(self, obj):
         return occurrence_stats(obj)["missed"]
 
+    def _get_schedule_window(self, old_instance, new_instance, validated_data):
+        today = timezone.localdate()
+        only_end_date_extended = (
+            "end_date" in validated_data
+            and old_instance.end_date
+            and new_instance.end_date
+            and new_instance.end_date > old_instance.end_date
+            and not any(f in validated_data for f in (self.SCHEDULE_FIELDS - {"end_date"}))
+        )
+        if only_end_date_extended:
+            from_date = max(today, old_instance.end_date + timedelta(days=1))
+            to_date = new_instance.end_date
+            return from_date, to_date
+
+        from_date = max(today, new_instance.start_date or today)
+        to_date = new_instance.end_date
+        return from_date, to_date
+
     @transaction.atomic
     def create(self, validated_data):
         validated_data["user"] = self.context["request"].user
@@ -159,33 +316,18 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     def update(self, instance, validated_data):
         if instance.status == "stopped":
             raise_tracker_error("CANNOT_MODIFY_CANCELLED", "Stopped habits cannot be modified.")
-        schedule_fields = {
-            "frequency_type",
-            "frequency_interval",
-            "frequency_days",
-            "frequency_times_per_period",
-            "frequency_period",
-            "start_date",
-            "end_date",
-            "start_time",
-            "end_time",
-        }
-        schedule_changed = any(f in validated_data for f in schedule_fields)
 
-        old_end_date = instance.end_date
+        schedule_changed = any(f in validated_data for f in self.SCHEDULE_FIELDS)
+        old_instance = Habit.objects.get(pk=instance.pk)
         habit = super().update(instance, validated_data)
 
         if schedule_changed:
-            today = timezone.localdate()
-            from_date = today
-            to_date = None
-            if "end_date" in validated_data and old_end_date and habit.end_date and habit.end_date > old_end_date and not any(
-                f in validated_data for f in (schedule_fields - {"end_date"})
-            ):
-                from_date = max(today, old_end_date + timedelta(days=1))
-                to_date = habit.end_date
+            from_date, to_date = self._get_schedule_window(old_instance, habit, validated_data)
             check_entity_schedule_conflicts(habit.user, habit, from_date=from_date, to_date=to_date)
-            regenerate_future_occurrences(habit)
+            try:
+                regenerate_future_occurrences(habit, from_date=from_date)
+            except TypeError:
+                regenerate_future_occurrences(habit)
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:

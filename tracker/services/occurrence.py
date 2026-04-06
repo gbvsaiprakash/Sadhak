@@ -68,21 +68,28 @@ def _generate_dates(entity, start_date, end_date):
         return
 
     if freq == "weekly":
-        anchor_weekday = entity.start_date.weekday()
-        if getattr(entity, "frequency_days", None):
-            try:
-                wd = int((entity.frequency_days or [])[0])
-                if 0 <= wd <= 6:
-                    anchor_weekday = wd
-            except (TypeError, ValueError, IndexError):
-                pass
-        # find first date >= start_date matching anchor weekday
+        # accept 1..7 (Mon..Sun), fallback to start_date weekday
+        raw_days = list(entity.frequency_days or [])
+        if raw_days:
+            weekdays = set()
+            for d in raw_days:
+                try:
+                    n = int(d)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= n <= 7:
+                    weekdays.add(n - 1)  # python weekday: Mon=0..Sun=6
+            if not weekdays:
+                weekdays = {entity.start_date.weekday()}
+        else:
+            weekdays = {entity.start_date.weekday()}
+
         current = start_date
-        while current.weekday() != anchor_weekday and current <= end_date:
-            current += timedelta(days=1)
         while current <= end_date:
-            yield current
-            current += timedelta(days=7 * interval)
+            weeks_since_start = (current - entity.start_date).days // 7
+            if weeks_since_start >= 0 and (weeks_since_start % interval == 0) and (current.weekday() in weekdays):
+                yield current
+            current += timedelta(days=1)
         return
 
     if freq == "monthly":
@@ -183,6 +190,35 @@ def _week_bounds(d):
     start = d - timedelta(days=d.weekday())
     return start, start + timedelta(days=6)
 
+def get_regeneration_window(instance, updated_entity, validated_data, schedule_fields):
+    today = timezone.localdate()
+    old_start_date = instance.start_date
+    old_end_date = instance.end_date
+    old_frequency_type = instance.frequency_type
+
+    only_end_date_extended = (
+        "end_date" in validated_data
+        and old_end_date
+        and updated_entity.end_date
+        and updated_entity.end_date > old_end_date
+        and not any(field in validated_data for field in (schedule_fields - {"end_date"}))
+    )
+
+    if only_end_date_extended:
+        regen_from = max(today, old_end_date + timedelta(days=1))
+        return regen_from, regen_from, updated_entity.end_date
+
+    if (
+        "start_date" in validated_data
+        or "frequency_type" in validated_data
+        or old_frequency_type != updated_entity.frequency_type
+    ):
+        regen_from = min(old_start_date, updated_entity.start_date)
+        return regen_from, regen_from, None
+
+    regen_from = min(today, updated_entity.start_date)
+    return regen_from, regen_from, None
+
 
 def _evenly_spaced_weekdays(k):
     # choose k unique weekdays spread across 0..6
@@ -275,7 +311,6 @@ def generate_occurrences(entity, from_date=None):
         date_iter = _generate_custom_period_dates(entity, start_date, end_date)
     else:
         date_iter = _generate_dates(entity, start_date, end_date)
-
     for scheduled_date in date_iter:
         for scheduled_time in _generate_times_for_date(entity, scheduled_date):
             payloads.append(
