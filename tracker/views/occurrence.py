@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import serializers
 
-from tracker.models import Habit, Task, TaskOccurrence
+from tracker.models import Habit, Task, TaskOccurrence, task
 from tracker.serializers.task import TaskOccurrenceSerializer
 from tracker.serializers.habit import HabitOccurrenceSerializer
 from tracker.views.mixins import TrackerAPIViewMixin
@@ -21,7 +21,11 @@ class TaskOccurrenceListAPIView(TrackerAPIViewMixin):
         task = Task.objects.filter(user=request.user, is_deleted=False, id=task_id).first()
         if task is None:
             return self.finalize_error("TASK_NOT_FOUND", "Task was not found.")
-        qs = TaskOccurrence.objects.filter(task=task).order_by("scheduled_date", "scheduled_time", "created_at")
+        # qs = TaskOccurrence.objects.filter(task=task).order_by("scheduled_date", "scheduled_time", "created_at")
+        qs = TaskOccurrence.objects.filter(task=task, scheduled_date__gte=task.start_date)
+        if task.end_date:
+            qs = qs.filter(scheduled_date__lte=task.end_date)
+        qs = qs.order_by("scheduled_date", "scheduled_time", "created_at")
         return Response(TaskOccurrenceSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 
@@ -31,7 +35,11 @@ class HabitOccurrenceListAPIView(TrackerAPIViewMixin):
         habit = Habit.objects.filter(user=request.user, is_deleted=False, id=habit_id).first()
         if habit is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit was not found.")
-        qs = TaskOccurrence.objects.filter(habit=habit).order_by("scheduled_date", "scheduled_time", "created_at")
+        # qs = TaskOccurrence.objects.filter(habit=habit).order_by("scheduled_date", "scheduled_time", "created_at")
+        qs = TaskOccurrence.objects.filter(habit=habit, scheduled_date__gte=habit.start_date)
+        if habit.end_date:
+            qs = qs.filter(scheduled_date__lte=habit.end_date)
+        qs = qs.order_by("scheduled_date", "scheduled_time", "created_at")
         return Response(HabitOccurrenceSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 

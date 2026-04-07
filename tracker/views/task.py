@@ -24,15 +24,6 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
     def get_task(self, pk):
         return self.get_object(self.get_queryset(), id=pk)
 
-    # def cancel_task(self, task):
-    #     TaskOccurrence.objects.filter(task=task, status__in=["pending", "skipped"]).update(status="cancelled", updated_at=timezone.now())
-    #     task.status = "cancelled"
-    #     task.save(update_fields=["status", "updated_at"])
-    #     if task.milestone:
-    #         check_milestone_completion(task.milestone)
-    #     if task.goal:
-    #         check_goal_completion(task.goal)
-
     def cancel_task(self, task):
         TaskOccurrence.objects.filter(task=task, status="pending").update(
             status="cancelled",

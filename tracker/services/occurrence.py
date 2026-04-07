@@ -220,26 +220,30 @@ def get_regeneration_window(instance, updated_entity, validated_data, schedule_f
     return regen_from, regen_from, None
 
 
-def _evenly_spaced_weekdays(k):
-    # choose k unique weekdays spread across 0..6
+def _anchored_evenly_spaced_weekdays(start_weekday, k):
+    """
+    start_weekday: Python weekday (Mon=0..Sun=6), typically entity.start_date.weekday()
+    k: times per week (1..7)
+    Returns stable weekday indexes (0..6), anchored to start_weekday.
+    """
     k = max(min(int(k), 7), 1)
-    if k == 1:
-        return [0]
-    step = 7 / k
-    picks = []
-    for i in range(k):
-        wd = int(round(i * step))
-        picks.append(min(wd, 6))
-    # de-dupe while preserving order, then fill remaining from left to right
+    start_weekday = int(start_weekday) % 7
+
+    # floor-based spacing gives Tue+Fri for start Tue and k=2
+    picks = [(start_weekday + int((i * 7) / k)) % 7 for i in range(k)]
+
     unique = []
     for wd in picks:
         if wd not in unique:
             unique.append(wd)
-    for wd in range(7):
-        if len(unique) >= k:
-            break
-        if wd not in unique:
-            unique.append(wd)
+
+    # safety fill if duplicates appear
+    cursor = start_weekday
+    while len(unique) < k:
+        if cursor not in unique:
+            unique.append(cursor)
+        cursor = (cursor + 1) % 7
+
     return sorted(unique)
 
 
@@ -257,8 +261,10 @@ def _generate_custom_period_dates(entity, start_date, end_date):
     if period == "week":
         week_start, week_end = _week_bounds(start_date)
         current_week_start = week_start
+        anchor = entity.start_date.weekday()
+
         while current_week_start <= end_date:
-            weekdays = _evenly_spaced_weekdays(k)
+            weekdays = _anchored_evenly_spaced_weekdays(anchor, k)
             for wd in weekdays:
                 candidate = current_week_start + timedelta(days=wd)
                 if start_date <= candidate <= end_date:
@@ -270,22 +276,42 @@ def _generate_custom_period_dates(entity, start_date, end_date):
         cursor = start_date.replace(day=1)
         while cursor <= end_date:
             last_day = monthrange(cursor.year, cursor.month)[1]
-            if k >= last_day:
-                days = list(range(1, last_day + 1))
-            else:
-                step = last_day / k
-                days = sorted({max(1, min(last_day, int(round(1 + i * step)))) for i in range(k)})
-                while len(days) < k:
-                    for d in range(1, last_day + 1):
-                        if d not in days:
-                            days.append(d)
-                            if len(days) >= k:
-                                break
-                days = sorted(days[:k])
-            for d in days:
-                candidate = cursor.replace(day=d)
-                if start_date <= candidate <= end_date:
-                    yield candidate
+            month_start = cursor
+            month_end = cursor.replace(day=last_day)
+
+            # Active window for this month only
+            active_start = max(month_start, start_date)
+            active_end = min(month_end, end_date)
+
+            if active_start <= active_end:
+                span_days = (active_end - active_start).days + 1
+                picks_count = min(k, span_days)
+
+                if picks_count == span_days:
+                    offsets = list(range(span_days))
+                else:
+                    # evenly spaced offsets in active window
+                    offsets = []
+                    if picks_count == 1:
+                        offsets = [0]
+                    else:
+                        for i in range(picks_count):
+                            off = int(round(i * (span_days - 1) / (picks_count - 1)))
+                            offsets.append(off)
+                    offsets = sorted(set(offsets))
+                    # fill if dedupe reduced count
+                    x = 0
+                    while len(offsets) < picks_count and x < span_days:
+                        if x not in offsets:
+                            offsets.append(x)
+                        x += 1
+                    offsets = sorted(offsets[:picks_count])
+
+                for off in offsets:
+                    candidate = active_start + timedelta(days=off)
+                    if start_date <= candidate <= end_date:
+                        yield candidate
+
             # next month
             month = cursor.month + 1
             year = cursor.year + (month - 1) // 12
@@ -294,7 +320,7 @@ def _generate_custom_period_dates(entity, start_date, end_date):
         return
 
 
-def generate_occurrences(entity, from_date=None):
+def generate_occurrences(entity, from_date=None, to_date=None):
     start_date = max(entity.start_date, from_date or entity.start_date)
     if entity.frequency_type == "once":
         end_date = entity.start_date
@@ -302,6 +328,9 @@ def generate_occurrences(entity, from_date=None):
         end_date = entity.end_date
     else:
         end_date = timezone.localdate() + timedelta(days=90)
+
+    if to_date is not None:
+        end_date = min(end_date, to_date)
 
     if end_date < start_date:
         return []
@@ -325,13 +354,35 @@ def generate_occurrences(entity, from_date=None):
 
 
 @transaction.atomic
-def regenerate_future_occurrences(entity):
-    today = timezone.localdate()
+def regenerate_future_occurrences(entity, from_date=None):
+    effective_from = from_date or timezone.localdate()
     occurrence_filters = _occurrence_model_fields(entity)
-    TaskOccurrence.objects.filter(**occurrence_filters, scheduled_date__gte=today).exclude(
+
+    TaskOccurrence.objects.filter(
+        **occurrence_filters,
+        scheduled_date__gte=effective_from,
+    ).exclude(
         status__in=RESOLVED_OCCURRENCE_STATUSES
     ).delete()
-    return generate_occurrences(entity, from_date=today)
+
+    return generate_occurrences(entity, from_date=effective_from)
+
+@transaction.atomic
+def reconcile_occurrences(entity, window_from, window_to=None):
+    """
+    Backward/forward-safe schedule reconciliation:
+    - preserve completed/skipped
+    - rebuild unresolved occurrences inside impacted window
+    """
+    occurrence_filters = _occurrence_model_fields(entity)
+
+    q = TaskOccurrence.objects.filter(**occurrence_filters, scheduled_date__gte=window_from)
+    if window_to is not None:
+        q = q.filter(scheduled_date__lte=window_to)
+
+    q.exclude(status__in=RESOLVED_OCCURRENCE_STATUSES).delete()
+    return generate_occurrences(entity, from_date=window_from, to_date=window_to)
+
 
 
 def mark_occurrence(entity, occurrence, status_value, notes=None):

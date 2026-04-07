@@ -13,6 +13,7 @@ from tracker.services import (
     check_milestone_completion,
     generate_occurrences,
     regenerate_future_occurrences,
+    reconcile_occurrences,
 )
 
 
@@ -137,7 +138,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         days = [d for d in raw_days if isinstance(d, (int, str))]
         invalid = [str(d) for d in days if d not in valid_values]
         if invalid:
-            raise_tracker_error("INVALID_FREQUENCY_CONFIG", f"Invalid { 'weekday(s)' if frequency_type == "weekly" else 'monthday(s)' }: {', '.join(invalid)}")
+            # raise_tracker_error("INVALID_FREQUENCY_CONFIG", f"Invalid { 'weekday(s)' if frequency_type == "weekly" else 'monthday(s)' }: {', '.join(invalid)}")
+            raise_tracker_error(
+                "INVALID_FREQUENCY_CONFIG",
+                f"Invalid {'weekday(s)' if frequency_type == 'weekly' else 'monthday(s)'}: {', '.join(invalid)}",
+            )
+
         return list(dict.fromkeys(days))
 
     def _normalize_frequency_payload(self, attrs):
@@ -151,8 +157,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         times_per_period = self._effective(attrs, "frequency_times_per_period")
         period = self._effective(attrs, "frequency_period")
         day_of_month = days[0] if days and frequency_type == "monthly" else self._effective(attrs, "day_of_month")
-        interval_hours = self._effective(attrs, "interval_hours")
-        print(days, day_of_month, frequency_type)
+        interval_hours = self._effective(attrs, "interval_hours") or self._effective(attrs, "frequency_interval") if frequency_type == "hourly" else None
         attrs["frequency_days"] = days
 
         if frequency_type == "once":
@@ -218,37 +223,45 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
                     "INVALID_FREQUENCY_CONFIG",
                     "Custom does not support weekday selection. Use weekly frequency for selected weekdays.",
                 )
-            times_mode = bool(times_per_period)
-            every_n_days_mode = bool(interval) and period == "day"
 
-            enabled_modes = sum([ times_mode, every_n_days_mode])
+            times_mode = times_per_period is not None
+
+            enabled_modes = int(times_mode)
             if enabled_modes != 1:
                 raise_tracker_error(
                     "INVALID_FREQUENCY_CONFIG",
                     "Custom must use exactly one mode: N times per period OR every N days.",
                 )
 
+            # common cleanup
+            attrs["frequency_days"] = []
+            attrs["day_of_week"] = None
+            attrs["day_of_month"] = None
+            attrs["interval_hours"] = None
 
             if times_mode:
                 if int(times_per_period) < 1:
                     raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_times_per_period must be >= 1.")
                 if period not in {"day", "week", "month"}:
                     raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_period must be one of: day, week, month.")
-                attrs["frequency_interval"] = int(interval or 1)
-                attrs["day_of_week"] = None
-                attrs["day_of_month"] = None
-                attrs["interval_hours"] = None
+                attrs["frequency_interval"] = int(interval or 1)  # keep NOT NULL DB column safe
                 return
 
-            if int(interval) < 1:
-                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Every N days requires frequency_interval >= 1.")
-            attrs["frequency_period"] = "day"
-            attrs["frequency_times_per_period"] = None
-            attrs["frequency_days"] = days
-            attrs["day_of_week"] = None
-            attrs["day_of_month"] = None
-            attrs["interval_hours"] = None
             return
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        start = instance.start_date.isoformat() if instance.start_date else None
+        end = instance.end_date.isoformat() if instance.end_date else None
+
+        if "occurrences" in data and start:
+            data["occurrences"] = [
+                o for o in data["occurrences"]
+                if o.get("scheduled_date")
+                and o["scheduled_date"] >= start
+                and (end is None or o["scheduled_date"] <= end)
+            ]
+        return data
 
     def validate(self, attrs):
         self.validate_parent_assignment(attrs)
@@ -274,12 +287,17 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
 
     def validate_time_window(self, attrs):
         start_time = attrs.get("start_time", getattr(self.instance, "start_time", None))
-        end_time = attrs.get("end_time", getattr(self.instance, "end_time", None))
+        end_time = attrs.get("end_time") #, getattr(self.instance, "end_time", None))
         if start_time is None:
             raise_tracker_error("START_TIME_REQUIRED", "start_time is required.")
         if not end_time:
             end_time = self._default_end_time(start_time)
             attrs["end_time"] = end_time
+        if end_time < start_time:
+            # If client sent +1h and wrapped past midnight (e.g., 23:30 -> 00:30),
+            # cap to end-of-day for same-day schedule semantics.
+            attrs["end_time"] = datetime.max.time().replace(hour=23, minute=59, second=59, microsecond=0)
+            end_time = attrs["end_time"]
         if start_time == end_time:
             raise_tracker_error("INVALID_TIME_WINDOW", "start_time and end_time cannot be the same.")
         if end_time < start_time:
@@ -294,23 +312,13 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
 
     def get_missed_occurrences(self, obj):
         return occurrence_stats(obj)["missed"]
-
+    
     def _get_schedule_window(self, old_instance, new_instance, validated_data):
-        today = timezone.localdate()
-        only_end_date_extended = (
-            "end_date" in validated_data
-            and old_instance.end_date
-            and new_instance.end_date
-            and new_instance.end_date > old_instance.end_date
-            and not any(f in validated_data for f in (self.SCHEDULE_FIELDS - {"end_date"}))
-        )
-        if only_end_date_extended:
-            from_date = max(today, old_instance.end_date + timedelta(days=1))
-            to_date = new_instance.end_date
-            return from_date, to_date
-
-        from_date = max(today, new_instance.start_date or today)
-        to_date = new_instance.end_date
+        horizon = timezone.localdate() + timedelta(days=90)
+        old_end = old_instance.end_date or horizon
+        new_end = new_instance.end_date or horizon
+        from_date = min(old_instance.start_date, new_instance.start_date)
+        to_date = max(old_end, new_end)
         return from_date, to_date
 
     @transaction.atomic
@@ -346,9 +354,10 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
                 exclude_id=task.id,
             )
             try:
-                regenerate_future_occurrences(task, from_date=from_date)
+                reconcile_occurrences(task, from_date=from_date, to_date=to_date)
             except TypeError:
-                regenerate_future_occurrences(task)
+                # fallback for any unforeseen issues in reconciliation logic
+                generate_occurrences(task, from_date=from_date, to_date=to_date)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:
