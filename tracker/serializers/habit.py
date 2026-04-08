@@ -24,6 +24,7 @@ class HabitOccurrenceSerializer(serializers.ModelSerializer):
             "id",
             "scheduled_date",
             "scheduled_time",
+            "schedule_end_time",
             "status",
             "completed_at",
             "notes",
@@ -78,7 +79,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         "interval_hours",
     }
 
-    VALID_WEEKDAYS = {1,2,3,4,5,6,7} #{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    VALID_WEEKDAYS = {1,2,3,4,5,6,0} #{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
     VALID_MONTHDAYS = set(range(1, 32))
 
     class Meta(HabitListSerializer.Meta):

@@ -68,7 +68,7 @@ def _generate_dates(entity, start_date, end_date):
         return
 
     if freq == "weekly":
-        # accept 1..7 (Mon..Sun), fallback to start_date weekday
+        # accept 0..6 (Sun..Sat)
         raw_days = list(entity.frequency_days or [])
         if raw_days:
             weekdays = set()
@@ -77,8 +77,8 @@ def _generate_dates(entity, start_date, end_date):
                     n = int(d)
                 except (TypeError, ValueError):
                     continue
-                if 1 <= n <= 7:
-                    weekdays.add(n - 1)  # python weekday: Mon=0..Sun=6
+                if 0 <= n <= 6:
+                    weekdays.add(n)  # python weekday: Mon=0..Sun=6
             if not weekdays:
                 weekdays = {entity.start_date.weekday()}
         else:
@@ -136,53 +136,102 @@ def _generate_dates(entity, start_date, end_date):
         return
 
 
+# def _generate_times_for_date(entity, scheduled_date):
+#     freq = entity.frequency_type
+#     start_time = _safe_time(entity.start_time)
+#     end_time = _safe_time(entity.end_time)
+#     duration = _entity_duration(entity)
+
+
+
+#     if freq != "custom":
+#         if freq != "hourly":
+#             return [start_time]
+#         # hourly
+#         interval = max(int(getattr(entity, "frequency_interval", 1) or 1), 1)
+#         current = datetime.combine(scheduled_date, start_time)
+#         day_end = datetime.combine(scheduled_date, time(23, 59))
+#         times = []
+#         while current <= day_end:
+#             times.append(current.time().replace(second=0, microsecond=0))
+#             current += timedelta(hours=interval)
+#         return times
+
+#     # custom
+#     if entity.frequency_times_per_period and entity.frequency_period:
+#         k = int(entity.frequency_times_per_period)
+#         if k <= 0:
+#             return [start_time]
+
+#         if entity.frequency_period == "day":
+#             if k == 1:
+#                 return [start_time]
+#             # place k occurrences evenly in [start_time, end_time)
+#             start_dt = datetime.combine(scheduled_date, start_time)
+#             end_dt = datetime.combine(scheduled_date, end_time)
+#             window = end_dt - start_dt
+#             if window <= timedelta(minutes=0):
+#                 return [start_time]
+#             step = window / k
+#             times = []
+#             for i in range(k):
+#                 t = (start_dt + (step * i)).time().replace(second=0, microsecond=0)
+#                 # ensure the implied end doesn't overflow past 23:59
+#                 if _add_duration(t, duration) <= time(23, 59):
+#                     times.append(t)
+#             return sorted(set(times))
+
+#         # week/month handled at date selection level; within a selected date we use start_time
+#         return [start_time]
+
+#     return [start_time]
+
 def _generate_times_for_date(entity, scheduled_date):
     freq = entity.frequency_type
     start_time = _safe_time(entity.start_time)
-    end_time = _safe_time(entity.end_time)
-    duration = _entity_duration(entity)
+    end_time = _safe_time(entity.end_time)  # can be None
+
+    def slot_end(t):
+        return end_time if end_time else None
 
     if freq != "custom":
         if freq != "hourly":
-            return [start_time]
-        # hourly
+            return [(start_time, slot_end(start_time))]
+
         interval = max(int(getattr(entity, "frequency_interval", 1) or 1), 1)
         current = datetime.combine(scheduled_date, start_time)
-        day_end = datetime.combine(scheduled_date, time(23, 59))
-        times = []
+        day_end = datetime.combine(scheduled_date, end_time or time(23, 59))
+        slots = []
         while current <= day_end:
-            times.append(current.time().replace(second=0, microsecond=0))
+            t = current.time().replace(second=0, microsecond=0)
+            slots.append((t, slot_end(t)))
             current += timedelta(hours=interval)
-        return times
+        return slots
 
-    # custom
     if entity.frequency_times_per_period and entity.frequency_period:
         k = int(entity.frequency_times_per_period)
         if k <= 0:
-            return [start_time]
+            return [(start_time, slot_end(start_time))]
 
         if entity.frequency_period == "day":
             if k == 1:
-                return [start_time]
-            # place k occurrences evenly in [start_time, end_time)
+                return [(start_time, slot_end(start_time))]
             start_dt = datetime.combine(scheduled_date, start_time)
-            end_dt = datetime.combine(scheduled_date, end_time)
+            end_dt = datetime.combine(scheduled_date, end_time or time(23, 59))
             window = end_dt - start_dt
             if window <= timedelta(minutes=0):
-                return [start_time]
+                return [(start_time, slot_end(start_time))]
             step = window / k
-            times = []
+            slots = []
             for i in range(k):
                 t = (start_dt + (step * i)).time().replace(second=0, microsecond=0)
-                # ensure the implied end doesn't overflow past 23:59
-                if _add_duration(t, duration) <= time(23, 59):
-                    times.append(t)
-            return sorted(set(times))
+                slots.append((t, slot_end(t)))
+            return slots
 
-        # week/month handled at date selection level; within a selected date we use start_time
-        return [start_time]
+        return [(start_time, slot_end(start_time))]
 
-    return [start_time]
+    return [(start_time, slot_end(start_time))]
+
 
 
 def _week_bounds(d):
@@ -341,11 +390,12 @@ def generate_occurrences(entity, from_date=None, to_date=None):
     else:
         date_iter = _generate_dates(entity, start_date, end_date)
     for scheduled_date in date_iter:
-        for scheduled_time in _generate_times_for_date(entity, scheduled_date):
+        for scheduled_time, schedule_end_time in _generate_times_for_date(entity, scheduled_date):
             payloads.append(
                 TaskOccurrence(
                     scheduled_date=scheduled_date,
                     scheduled_time=scheduled_time,
+                    schedule_end_time=schedule_end_time,
                     **_occurrence_model_fields(entity),
                 )
             )

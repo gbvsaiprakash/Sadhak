@@ -1,6 +1,6 @@
 from django.utils import timezone
 from rest_framework import serializers
-
+from datetime import datetime
 from tracker.constants import ACTIVE_HABIT_STATUSES, ACTIVE_TASK_STATUSES
 from tracker.exceptions import raise_tracker_error
 
@@ -158,12 +158,31 @@ def is_overdue(instance):
 
 def occurrence_stats(instance):
     if not hasattr(instance, "occurrences"):
-        return {"total": 0, "completed": 0, "missed": 0, "next_occurrence": None}
+        return {"total": 0, "completed": 0, "missed": 0, "skipped": 0, "next_occurrence": None}
     qs = instance.occurrences.all()
     next_occurrence = qs.filter(scheduled_date__gte=timezone.localdate(), status="pending").order_by("scheduled_date", "scheduled_time").first()
+    missed_count = qs.filter(status="missed").count()
+    now = timezone.localtime()
+    pending_qs = qs.filter(status="pending")
+    computed_missed = 0
+    for o in pending_qs:
+        end_t = o.schedule_end_time or o.scheduled_time
+        if end_t is None:
+            continue
+        deadline = timezone.make_aware(
+            datetime.combine(o.scheduled_date, end_t),
+            timezone.get_current_timezone(),
+        )
+        if deadline < now:
+            computed_missed += 1
+
+    # avoid double-count (persisted + computed pending overdue)
+    final_missed_count = missed_count + computed_missed
+
     return {
         "total": qs.count(),
         "completed": qs.filter(status="completed").count(),
-        "missed": qs.filter(status="missed").count(),
+        "missed": final_missed_count,
+        "skipped": qs.filter(status="skipped").count(),
         "next_occurrence": next_occurrence,
     }

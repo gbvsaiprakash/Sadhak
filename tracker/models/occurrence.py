@@ -15,6 +15,7 @@ class TaskOccurrence(UUIDTimeStampedModel):
     habit = models.ForeignKey("tracker.Habit", on_delete=models.CASCADE, related_name="occurrences", blank=True, null=True)
     scheduled_date = models.DateField()
     scheduled_time = models.TimeField(blank=True, null=True)
+    schedule_end_time = models.TimeField(blank=True, null=True)  # for tasks with time windows
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     completed_at = models.DateTimeField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)

@@ -102,7 +102,7 @@ def check_entity_schedule_conflicts(user, entity, from_date=None, to_date=None, 
         date_iter = _generate_dates(entity, start_date, end_date)
 
     for scheduled_date in date_iter:
-        for start_t in _generate_times_for_date(entity, scheduled_date):
+        for start_t, end_t in _generate_times_for_date(entity, scheduled_date):
             end_t = _add_duration(start_t, duration)
             check_time_conflict(user, entity, scheduled_date, start_t, end_t, exclude_id=exclude_id)
 

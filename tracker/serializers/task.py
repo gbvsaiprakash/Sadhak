@@ -24,6 +24,7 @@ class TaskOccurrenceSerializer(serializers.ModelSerializer):
             "id",
             "scheduled_date",
             "scheduled_time",
+            "schedule_end_time",
             "status",
             "completed_at",
             "notes",
@@ -67,6 +68,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     total_occurrences = serializers.SerializerMethodField()
     completed_occurrences = serializers.SerializerMethodField()
     missed_occurrences = serializers.SerializerMethodField()
+    skipped_occurrences = serializers.SerializerMethodField()
 
     SCHEDULE_FIELDS = {
         "frequency_type",
@@ -83,7 +85,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         "interval_hours",
     }
 
-    VALID_WEEKDAYS = {1,2,3,4,5,6,7} #{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    VALID_WEEKDAYS = {1,2,3,4,5,6,0} #{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
     VALID_MONTHDAYS = set(range(1, 32))
     
     class Meta(TaskListSerializer.Meta):
@@ -114,6 +116,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             "total_occurrences",
             "completed_occurrences",
             "missed_occurrences",
+            "skipped_occurrences",
             "occurrences",
             "created_at",
             "updated_at",
@@ -312,6 +315,9 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
 
     def get_missed_occurrences(self, obj):
         return occurrence_stats(obj)["missed"]
+    
+    def get_skipped_occurrences(self, obj):
+        return occurrence_stats(obj)["skipped"]
     
     def _get_schedule_window(self, old_instance, new_instance, validated_data):
         horizon = timezone.localdate() + timedelta(days=90)
