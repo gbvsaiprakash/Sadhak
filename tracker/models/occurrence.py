@@ -39,12 +39,12 @@ class TaskOccurrence(UUIDTimeStampedModel):
             ),
             models.UniqueConstraint(
                 fields=["task", "scheduled_date", "scheduled_time"],
-                condition=models.Q(task__isnull=False),
+                condition=models.Q(task__isnull=False, is_deleted=False),
                 name="tracker_unique_task_occurrence",
             ),
             models.UniqueConstraint(
                 fields=["habit", "scheduled_date", "scheduled_time"],
-                condition=models.Q(habit__isnull=False),
+                condition=models.Q(habit__isnull=False, is_deleted=False),
                 name="tracker_unique_habit_occurrence",
             ),
         ]

@@ -27,6 +27,9 @@ class Habit(UUIDTimeStampedModel):
     end_date = models.DateField(blank=True, null=True)
     is_habit = models.BooleanField(default=True, editable=False)
     is_deleted = models.BooleanField(default=False)
+    conflict_override = models.BooleanField(default=False)
+    conflict_override_reason = models.TextField(blank=True, null=True)
+    conflict_overridden_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
         ordering = ("start_date", "start_time", "created_at")

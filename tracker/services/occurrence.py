@@ -420,18 +420,79 @@ def regenerate_future_occurrences(entity, from_date=None):
 @transaction.atomic
 def reconcile_occurrences(entity, window_from, window_to=None):
     """
-    Backward/forward-safe schedule reconciliation:
-    - preserve completed/skipped
-    - rebuild unresolved occurrences inside impacted window
+    Reconcile occurrences after schedule edits:
+    - delete unresolved occurrences in impacted window
+    - keep resolved only if they still match the new schedule slot
+    - soft-delete resolved that no longer match
+    - restore matching soft-deleted rows if no active row exists for that slot
     """
     occurrence_filters = _occurrence_model_fields(entity)
 
+    # Window queryset
     q = TaskOccurrence.objects.filter(**occurrence_filters, scheduled_date__gte=window_from)
     if window_to is not None:
         q = q.filter(scheduled_date__lte=window_to)
 
+    # 1) remove unresolved slots (will be regenerated)
     q.exclude(status__in=RESOLVED_OCCURRENCE_STATUSES).delete()
-    return generate_occurrences(entity, from_date=window_from, to_date=window_to)
+
+    # 2) generate under new schedule (ignore_conflicts handles duplicates)
+    generated = generate_occurrences(entity, from_date=window_from, to_date=window_to)
+    expected_slots = {(o.scheduled_date, o.scheduled_time) for o in generated}
+
+    # 3) prune resolved slots that no longer belong
+    resolved_qs = TaskOccurrence.objects.filter(
+        **occurrence_filters,
+        status__in=RESOLVED_OCCURRENCE_STATUSES,
+        scheduled_date__gte=window_from,
+    )
+    if window_to is not None:
+        resolved_qs = resolved_qs.filter(scheduled_date__lte=window_to)
+
+    to_soft_delete_ids = []
+    for occ in resolved_qs.only("id", "scheduled_date", "scheduled_time"):
+        if (occ.scheduled_date, occ.scheduled_time) not in expected_slots:
+            to_soft_delete_ids.append(occ.id)
+
+    if to_soft_delete_ids:
+        TaskOccurrence.objects.filter(id__in=to_soft_delete_ids).update(
+            is_deleted=True,
+            updated_at=timezone.now(),
+        )
+
+    # 4) restore matching soft-deleted rows only when slot has no active row
+    active_qs = TaskOccurrence.objects.filter(
+        **occurrence_filters,
+        is_deleted=False,
+        scheduled_date__gte=window_from,
+    )
+    if window_to is not None:
+        active_qs = active_qs.filter(scheduled_date__lte=window_to)
+
+    active_slots = set(active_qs.values_list("scheduled_date", "scheduled_time"))
+
+    soft_qs = TaskOccurrence.objects.filter(
+        **occurrence_filters,
+        is_deleted=True,
+        scheduled_date__gte=window_from,
+    )
+    if window_to is not None:
+        soft_qs = soft_qs.filter(scheduled_date__lte=window_to)
+
+    restore_ids = []
+    for occ in soft_qs.only("id", "scheduled_date", "scheduled_time"):
+        slot = (occ.scheduled_date, occ.scheduled_time)
+        if slot in expected_slots and slot not in active_slots:
+            restore_ids.append(occ.id)
+            active_slots.add(slot)
+
+    if restore_ids:
+        TaskOccurrence.objects.filter(id__in=restore_ids).update(
+            is_deleted=False,
+            updated_at=timezone.now(),
+        )
+
+    return generated
 
 
 

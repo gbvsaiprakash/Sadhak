@@ -159,7 +159,7 @@ def is_overdue(instance):
 def occurrence_stats(instance):
     if not hasattr(instance, "occurrences"):
         return {"total": 0, "completed": 0, "missed": 0, "skipped": 0, "next_occurrence": None}
-    qs = instance.occurrences.all()
+    qs = instance.occurrences.filter(is_deleted=False)
     next_occurrence = qs.filter(scheduled_date__gte=timezone.localdate(), status="pending").order_by("scheduled_date", "scheduled_time").first()
     missed_count = qs.filter(status="missed").count()
     now = timezone.localtime()

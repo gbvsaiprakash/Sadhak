@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import serializers
 
-from tracker.models import Habit, Task, TaskOccurrence, task
+from tracker.models import Habit, Task, TaskOccurrence
 from tracker.serializers.task import TaskOccurrenceSerializer
 from tracker.serializers.habit import HabitOccurrenceSerializer
 from tracker.views.mixins import TrackerAPIViewMixin
@@ -22,7 +22,7 @@ class TaskOccurrenceListAPIView(TrackerAPIViewMixin):
         if task is None:
             return self.finalize_error("TASK_NOT_FOUND", "Task was not found.")
         # qs = TaskOccurrence.objects.filter(task=task).order_by("scheduled_date", "scheduled_time", "created_at")
-        qs = TaskOccurrence.objects.filter(task=task, scheduled_date__gte=task.start_date)
+        qs = TaskOccurrence.objects.filter(task=task, scheduled_date__gte=task.start_date, is_deleted=False)
         if task.end_date:
             qs = qs.filter(scheduled_date__lte=task.end_date)
         qs = qs.order_by("scheduled_date", "scheduled_time", "created_at")
@@ -36,7 +36,7 @@ class HabitOccurrenceListAPIView(TrackerAPIViewMixin):
         if habit is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit was not found.")
         # qs = TaskOccurrence.objects.filter(habit=habit).order_by("scheduled_date", "scheduled_time", "created_at")
-        qs = TaskOccurrence.objects.filter(habit=habit, scheduled_date__gte=habit.start_date)
+        qs = TaskOccurrence.objects.filter(habit=habit, scheduled_date__gte=habit.start_date, is_deleted=False)
         if habit.end_date:
             qs = qs.filter(scheduled_date__lte=habit.end_date)
         qs = qs.order_by("scheduled_date", "scheduled_time", "created_at")
@@ -49,7 +49,7 @@ class TaskOccurrenceContextAPIView(TrackerAPIViewMixin):
         task = Task.objects.filter(user=request.user, is_deleted=False, id=task_id).first()
         if task is None:
             return self.finalize_error("TASK_NOT_FOUND", "Task was not found.")
-        occurrence = TaskOccurrence.objects.filter(task=task, id=pk).first()
+        occurrence = TaskOccurrence.objects.filter(task=task, id=pk, is_deleted=False).first()
         if occurrence is None:
             return self.finalize_error("TASK_NOT_FOUND", "Task occurrence was not found.")
         serializer = _OccurrenceContextSerializer(occurrence, data=request.data, partial=True, context=self.get_serializer_context())
@@ -64,7 +64,7 @@ class HabitOccurrenceContextAPIView(TrackerAPIViewMixin):
         habit = Habit.objects.filter(user=request.user, is_deleted=False, id=habit_id).first()
         if habit is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit was not found.")
-        occurrence = TaskOccurrence.objects.filter(habit=habit, id=pk).first()
+        occurrence = TaskOccurrence.objects.filter(habit=habit, id=pk, is_deleted=False).first()
         if occurrence is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit occurrence was not found.")
         serializer = _OccurrenceContextSerializer(occurrence, data=request.data, partial=True, context=self.get_serializer_context())

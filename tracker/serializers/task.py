@@ -31,6 +31,7 @@ class TaskOccurrenceSerializer(serializers.ModelSerializer):
             "context_title",
             "context_description",
             "context_checklist",
+            "is_deleted",
         )
 
 
@@ -261,6 +262,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             data["occurrences"] = [
                 o for o in data["occurrences"]
                 if o.get("scheduled_date")
+                and not o.get("is_deleted", False)
                 and o["scheduled_date"] >= start
                 and (end is None or o["scheduled_date"] <= end)
             ]
@@ -290,7 +292,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
 
     def validate_time_window(self, attrs):
         start_time = attrs.get("start_time", getattr(self.instance, "start_time", None))
-        end_time = attrs.get("end_time") #, getattr(self.instance, "end_time", None))
+        end_time = attrs.get("end_time", getattr(self.instance, "end_time", None))
         if start_time is None:
             raise_tracker_error("START_TIME_REQUIRED", "start_time is required.")
         if not end_time:
@@ -352,18 +354,20 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
 
         if schedule_changed:
             from_date, to_date = self._get_schedule_window(old_instance, task, validated_data)
+            today = timezone.localdate()
+            effective_from = max(today, from_date)
             check_entity_schedule_conflicts(
                 task.user,
                 task,
-                from_date=from_date,
+                from_date=effective_from,
                 to_date=to_date,
                 exclude_id=task.id,
             )
             try:
-                reconcile_occurrences(task, from_date=from_date, to_date=to_date)
+                reconcile_occurrences(task, window_from=effective_from, window_to=to_date)
             except TypeError:
                 # fallback for any unforeseen issues in reconciliation logic
-                generate_occurrences(task, from_date=from_date, to_date=to_date)
+                generate_occurrences(task, from_date=effective_from, to_date=to_date)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:

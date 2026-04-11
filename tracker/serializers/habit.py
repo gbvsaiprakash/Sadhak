@@ -31,6 +31,7 @@ class HabitOccurrenceSerializer(serializers.ModelSerializer):
             "context_title",
             "context_description",
             "context_checklist",
+            "is_deleted",
         )
 
 
@@ -63,6 +64,9 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     total_occurrences = serializers.SerializerMethodField()
     completed_occurrences = serializers.SerializerMethodField()
     missed_occurrences = serializers.SerializerMethodField()
+    conflict_override = serializers.BooleanField(write_only=True, required=False, default=False)
+    conflict_override_reason = serializers.CharField(write_only=True, required=False, allow_blank=False)
+
 
     SCHEDULE_FIELDS = {
         "frequency_type",
@@ -112,6 +116,9 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             "occurrences",
             "created_at",
             "updated_at",
+            "conflict_override",
+            "conflict_override_reason",
+
         )
         read_only_fields = ("user", "is_habit", "created_at", "updated_at")
 
@@ -243,6 +250,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             data["occurrences"] = [
                 o for o in data["occurrences"]
                 if o.get("scheduled_date")
+                and not o.get("is_deleted", False)
                 and o["scheduled_date"] >= start
                 and (end is None or o["scheduled_date"] <= end)
             ]
@@ -274,7 +282,8 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
     def validate_time_window(self, attrs):
         start_time = attrs.get("start_time", getattr(self.instance, "start_time", None))
-        end_time = attrs.get("end_time") #, getattr(self.instance, "end_time", None))
+        end_time = attrs.get("end_time", getattr(self.instance, "end_time", None))
+
         if start_time is None:
             raise_tracker_error("START_TIME_REQUIRED", "start_time is required.")
         if not end_time:
@@ -310,11 +319,35 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
     @transaction.atomic
     def create(self, validated_data):
+        override = validated_data.pop("conflict_override", False)
+        reason = validated_data.pop("conflict_override_reason", None)
+
         validated_data["user"] = self.context["request"].user
         validated_data["is_habit"] = True
         draft = Habit(**validated_data)
-        check_entity_schedule_conflicts(draft.user, draft)
+        override = validated_data.pop("conflict_override", False)
+        reason = validated_data.pop("conflict_override_reason", None)
+
+        # check_entity_schedule_conflicts(draft.user, draft)
+        try:
+            check_entity_schedule_conflicts(draft.user, draft, allow_habit_habit_override=False)
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code != "HABIT_CONFLICT_OVERRIDE_REQUIRED":
+                raise
+            if not override:
+                raise
+            if not reason:
+                raise_tracker_error("CONFLICT_OVERRIDE_REASON_REQUIRED", "Please provide conflict_override_reason.")
+            check_entity_schedule_conflicts(draft.user, draft, allow_habit_habit_override=True)
+
         habit = super().create(validated_data)
+        habit.conflict_override = bool(override)
+        habit.conflict_override_reason = reason if override else None
+        habit.conflict_overridden_at = timezone.now() if override else None
+        habit.conflict_overridden_by = self.context["request"].user if override else None
+        habit.save(update_fields=["conflict_override", "conflict_override_reason", "conflict_overridden_at", "conflict_overridden_by", "updated_at"])
+
         generate_occurrences(habit)
         if habit.milestone:
             check_milestone_completion(habit.milestone)
@@ -327,19 +360,63 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         if instance.status == "stopped":
             raise_tracker_error("CANNOT_MODIFY_CANCELLED", "Stopped habits cannot be modified.")
 
+        override = validated_data.pop("conflict_override", False)
+        reason = validated_data.pop("conflict_override_reason", None)
+
         schedule_changed = any(f in validated_data for f in self.SCHEDULE_FIELDS)
         old_instance = Habit.objects.get(pk=instance.pk)
         habit = super().update(instance, validated_data)
 
         if schedule_changed:
             from_date, to_date = self._get_schedule_window(old_instance, habit, validated_data)
-            check_entity_schedule_conflicts(habit.user, habit, from_date=from_date, to_date=to_date)
+            effective_from = max(timezone.localdate(), from_date)
+            # check_entity_schedule_conflicts(habit.user, habit, from_date=from_date, to_date=to_date)
+            try:
+                check_entity_schedule_conflicts(
+                    habit.user,
+                    habit,
+                    from_date=effective_from,
+                    to_date=to_date,
+                    allow_habit_habit_override=False,
+                )
+            except Exception as exc:
+                code = getattr(exc, "code", None)
+                if code != "HABIT_CONFLICT_OVERRIDE_REQUIRED":
+                    raise
+                if not override:
+                    raise
+                if not reason:
+                    raise_tracker_error(
+                        "CONFLICT_OVERRIDE_REASON_REQUIRED",
+                        "Please provide conflict_override_reason to proceed with overlap override.",
+                    )
+
+                check_entity_schedule_conflicts(
+                    habit.user,
+                    habit,
+                    from_date=effective_from,
+                    to_date=to_date,
+                    allow_habit_habit_override=True,
+                )
             try:
                 # regenerate_future_occurrences(habit, from_date=from_date)
-                reconcile_occurrences(habit, from_date=from_date, to_date=to_date)
+                reconcile_occurrences(habit, window_from=effective_from, window_to=to_date)
             except TypeError:
                 # regenerate_future_occurrences(habit)
-                generate_occurrences(habit, from_date=from_date, to_date=to_date)
+                generate_occurrences(habit, from_date=effective_from, to_date=to_date)
+        habit.conflict_override = bool(override)
+        habit.conflict_override_reason = reason if override else None
+        habit.conflict_overridden_at = timezone.now() if override else None
+        habit.conflict_overridden_by = self.context["request"].user if override else None
+        habit.save(
+            update_fields=[
+                "conflict_override",
+                "conflict_override_reason",
+                "conflict_overridden_at",
+                "conflict_overridden_by",
+                "updated_at",
+            ]
+        )
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:

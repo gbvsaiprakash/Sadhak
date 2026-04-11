@@ -37,7 +37,7 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
             check_goal_completion(task.goal)
     
     def delete_task(self, task):
-        task.is_deleted = "True"
+        task.is_deleted = True
         task.save(update_fields=["is_deleted", "updated_at"])
         if task.milestone:
             check_milestone_completion(task.milestone)
