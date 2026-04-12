@@ -1,70 +1,156 @@
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 
-from tracker.constants import ACTIVE_HABIT_STATUSES, ACTIVE_TASK_STATUSES
+from django.db.models import Q
+from django.utils import timezone
+
 from tracker.exceptions import raise_tracker_error
+from tracker.models import TaskOccurrence
+from tracker.services.occurrence import _add_duration, _entity_duration, _generate_custom_period_dates, _generate_dates, _generate_times_for_date
 
 
-def _date_range(entity):
-    start = entity.start_date
-    if entity.frequency_type == "once":
-        return start, start
-    return start, entity.end_date or (start + timedelta(days=90))
+def _normalize_time(t):
+    if t is None:
+        return None
+    return t.replace(second=0, microsecond=0)
 
 
-def _time_anchor(entity):
-    return entity.time_of_day or time(hour=0, minute=0)
+def _overlaps(existing_start, existing_end, new_start, new_end):
+    # strict overlap; boundary touch is allowed
+    return existing_start < new_end and existing_end > new_start
 
 
-def _hourly_slots(entity):
-    interval = entity.interval_hours or 24
-    current = datetime.combine(date.today(), _time_anchor(entity))
-    end = datetime.combine(date.today(), time(23, 59))
-    slots = set()
-    while current <= end:
-        slots.add(current.time().replace(second=0, microsecond=0))
-        current += timedelta(hours=interval)
-    return slots
+def check_time_conflict(user, instance, scheduled_date, start_time, end_time, exclude_id=None,  allow_habit_habit_override=False):
+    """
+    Collision rules (same user, same date):
+      - task-task: collision
+      - task-habit: collision
+      - habit-task: collision
+      - habit-habit: allowed
+    """
+    start_time = _normalize_time(start_time)
+    end_time = _normalize_time(end_time)
 
+    if start_time is None or end_time is None:
+        return
 
-def _patterns_overlap(left, right):
-    if left.frequency_type == "hourly" or right.frequency_type == "hourly":
-        if left.frequency_type == right.frequency_type == "hourly":
-            return bool(_hourly_slots(left) & _hourly_slots(right))
-        hourly = left if left.frequency_type == "hourly" else right
-        other = right if hourly is left else left
-        return _time_anchor(other) in _hourly_slots(hourly)
-    if left.frequency_type == "weekly" and right.frequency_type == "weekly":
-        return left.day_of_week == right.day_of_week and _time_anchor(left) == _time_anchor(right)
-    if left.frequency_type == "monthly" and right.frequency_type == "monthly":
-        return left.day_of_month == right.day_of_month and _time_anchor(left) == _time_anchor(right)
-    if left.frequency_type == "once" and right.frequency_type == "once":
-        return left.start_date == right.start_date and _time_anchor(left) == _time_anchor(right)
-    return _time_anchor(left) == _time_anchor(right)
-
-
-def _date_windows_overlap(left, right):
-    left_start, left_end = _date_range(left)
-    right_start, right_end = _date_range(right)
-    return left_start <= right_end and right_start <= left_end
-
-
-def check_time_conflict(user, entity):
-    task_qs = user.tracker_tasks.exclude(id=getattr(entity, "id", None)).exclude(status__in={"cancelled", "completed", "skipped"})
-    habit_qs = user.tracker_habits.exclude(id=getattr(entity, "id", None)).exclude(status__in={"stopped", "completed"})
-
-    candidates = list(task_qs) + ([] if entity.is_habit is False else [])
-    if entity.is_habit:
-        candidates = list(task_qs)
-    else:
-        candidates += list(habit_qs.filter(status__in=ACTIVE_HABIT_STATUSES))
-
-    for candidate in candidates:
-        if not _date_windows_overlap(entity, candidate):
-            continue
-        if not _patterns_overlap(entity, candidate):
-            continue
-        raise_tracker_error(
-            "CONFLICT_TIME_SLOT",
-            "A task already exists at this time for the given day pattern.",
-            details={"conflicting_id": str(candidate.id), "conflicting_title": candidate.title},
+    # determine which existing occurrences to consider
+    # if getattr(instance, "is_habit", False):
+    #     qs = TaskOccurrence.objects.filter(task__user=user, scheduled_date=scheduled_date).select_related("task")
+    #     qs = qs.filter(task__is_deleted=False).exclude(task__status__in={"cancelled"})
+    # else:
+    #     qs = (
+    #         TaskOccurrence.objects.filter(
+    #             Q(task__user=user) | Q(habit__user=user),
+    #             scheduled_date=scheduled_date,
+    #         )
+    #         .select_related("task", "habit")
+    #         .filter(Q(task__isnull=False, task__is_deleted=False) | Q(habit__isnull=False, habit__is_deleted=False))
+    #         .exclude(Q(task__isnull=False, task__status__in={"cancelled"}) | Q(habit__isnull=False, habit__status__in={"stopped"}))
+    #     )
+    # determine which existing occurrences to consider (tasks + habits)
+    qs = (
+        TaskOccurrence.objects.filter(
+            Q(task__user=user) | Q(habit__user=user),
+            scheduled_date=scheduled_date,
         )
+        .select_related("task", "habit")
+        .filter(is_deleted=False, status__in={"pending"})
+        .filter(
+            Q(task__isnull=False, task__is_deleted=False) |
+            Q(habit__isnull=False, habit__is_deleted=False)
+        )
+        .exclude(
+            Q(task__isnull=False, task__status__in={"cancelled"}) |
+            Q(habit__isnull=False, habit__status__in={"stopped"})
+        )
+    )
+
+
+    if exclude_id:
+        if getattr(instance, "is_habit", False):
+            qs = qs.exclude(habit_id=exclude_id)
+        else:
+            qs = qs.exclude(task_id=exclude_id)
+    
+    qs = qs.filter(is_deleted=False)
+    qs = qs.filter(status__in={"pending"})
+
+    for occ in qs:
+        parent = occ.task or occ.habit
+        if parent is None:
+            continue
+        # duration = _entity_duration(parent)
+        # occ_start = _normalize_time(occ.scheduled_time or parent.start_time)
+        # occ_end = _add_duration(occ_start, duration)
+        occ_start = _normalize_time(occ.scheduled_time or parent.start_time)
+        occ_end = _normalize_time(occ.schedule_end_time) if getattr(occ, "schedule_end_time", None) else None
+        if occ_end is None:
+            duration = _entity_duration(parent)
+            occ_end = _add_duration(occ_start, duration)
+
+        if _overlaps(occ_start, occ_end, start_time, end_time):
+            conflict_type = "task" if occ.task_id else "habit"
+            is_habit_habit = bool(getattr(instance, "is_habit", False) and occ.habit_id)
+
+            if is_habit_habit and allow_habit_habit_override:
+                continue
+            if is_habit_habit:
+                raise_tracker_error(
+                    "HABIT_CONFLICT_OVERRIDE_REQUIRED",
+                    "This habit overlaps another habit. Override to proceed.",
+                    details={
+                        "conflict_date": str(scheduled_date),
+                        "conflict_with": parent.title,
+                        "conflict_type": conflict_type,
+                        "conflict_start": occ_start.strftime("%H:%M"),
+                        "conflict_end": occ_end.strftime("%H:%M"),
+                    },
+                )
+            raise_tracker_error(
+                "TIME_COLLISION",
+                f"This task conflicts with an existing task or habit on {scheduled_date} from {start_time.strftime('%H:%M')} to {end_time.strftime('%H:%M')}.",
+                details={
+                    "conflict_date": str(scheduled_date),
+                    "conflict_with": parent.title,
+                    "conflict_type": conflict_type,
+                    "conflict_start": occ_start.strftime("%H:%M"),
+                    "conflict_end": occ_end.strftime("%H:%M"),
+                },
+            )
+
+
+def check_entity_schedule_conflicts(user, entity, from_date=None, to_date=None, exclude_id=None,  allow_habit_habit_override=False):
+    """
+    Checks the occurrences that would be generated for entity (without creating them).
+    Returns None if no conflicts; raises TIME_COLLISION otherwise (first conflict only).
+    """
+    today = timezone.localdate()
+    start_date = max(entity.start_date, from_date or entity.start_date, today)
+    if entity.frequency_type == "once":
+        end_date = entity.start_date
+    elif to_date:
+        end_date = to_date
+    elif entity.end_date:
+        end_date = entity.end_date
+    else:
+        end_date = timezone.localdate() + timedelta(days=90)
+
+    if end_date < start_date:
+        return
+
+    duration = _entity_duration(entity)
+
+    if entity.frequency_type == "custom" and entity.frequency_times_per_period and entity.frequency_period in {"week", "month"}:
+        date_iter = _generate_custom_period_dates(entity, start_date, end_date)
+    else:
+        date_iter = _generate_dates(entity, start_date, end_date)
+
+    for scheduled_date in date_iter:
+        # for start_t, end_t in _generate_times_for_date(entity, scheduled_date):
+        #     end_t = _add_duration(start_t, duration)
+        #     check_time_conflict(user, entity, scheduled_date, start_t, end_t, exclude_id=exclude_id)
+        for start_t, end_t in _generate_times_for_date(entity, scheduled_date):
+            if end_t is None:
+                end_t = _add_duration(start_t, duration)
+            check_time_conflict(user, entity, scheduled_date, start_t, end_t, exclude_id=exclude_id, allow_habit_habit_override=allow_habit_habit_override)
+

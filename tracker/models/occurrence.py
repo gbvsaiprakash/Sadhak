@@ -15,9 +15,13 @@ class TaskOccurrence(UUIDTimeStampedModel):
     habit = models.ForeignKey("tracker.Habit", on_delete=models.CASCADE, related_name="occurrences", blank=True, null=True)
     scheduled_date = models.DateField()
     scheduled_time = models.TimeField(blank=True, null=True)
+    schedule_end_time = models.TimeField(blank=True, null=True)  # for tasks with time windows
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     completed_at = models.DateTimeField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
+    context_title = models.CharField(max_length=255, blank=True, null=True)
+    context_description = models.TextField(blank=True, null=True)
+    context_checklist = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ("scheduled_date", "scheduled_time", "created_at")
@@ -35,12 +39,12 @@ class TaskOccurrence(UUIDTimeStampedModel):
             ),
             models.UniqueConstraint(
                 fields=["task", "scheduled_date", "scheduled_time"],
-                condition=models.Q(task__isnull=False),
+                condition=models.Q(task__isnull=False, is_deleted=False),
                 name="tracker_unique_task_occurrence",
             ),
             models.UniqueConstraint(
                 fields=["habit", "scheduled_date", "scheduled_time"],
-                condition=models.Q(habit__isnull=False),
+                condition=models.Q(habit__isnull=False, is_deleted=False),
                 name="tracker_unique_habit_occurrence",
             ),
         ]

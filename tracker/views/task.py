@@ -1,6 +1,6 @@
 from rest_framework import status
 from rest_framework.response import Response
-
+from django.utils import timezone
 from tracker.models import Task, TaskOccurrence
 from tracker.serializers import TaskDetailSerializer, TaskListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, mark_occurrence, sync_task_status_from_occurrences
@@ -25,6 +25,10 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
         return self.get_object(self.get_queryset(), id=pk)
 
     def cancel_task(self, task):
+        TaskOccurrence.objects.filter(task=task, status="pending").update(
+            status="cancelled",
+            updated_at=timezone.now(),
+        )
         task.status = "cancelled"
         task.save(update_fields=["status", "updated_at"])
         if task.milestone:
@@ -33,7 +37,7 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
             check_goal_completion(task.goal)
     
     def delete_task(self, task):
-        task.is_deleted = "True"
+        task.is_deleted = True
         task.save(update_fields=["is_deleted", "updated_at"])
         if task.milestone:
             check_milestone_completion(task.milestone)

@@ -1,14 +1,21 @@
 from django.utils import timezone
 from rest_framework import serializers
-
+from datetime import datetime
 from tracker.constants import ACTIVE_HABIT_STATUSES, ACTIVE_TASK_STATUSES
 from tracker.exceptions import raise_tracker_error
 
+
+class EmptySerializer(serializers.Serializer):
+    pass
 
 def _get_occurrence_units(tasks, habits):
     """
     Given a queryset of tasks and habits (already prefetched with occurrences),
     returns (total_units, completed_units) based on occurrence-level granularity.
+
+    Note: completion calculations depend only on the `occurrences` queryset, so
+    expanding frequency pattern support does not change this logic as long as
+    occurrences continue to be generated and stored per schedule unit.
     """
     total_units = 0
     completed_units = 0
@@ -71,24 +78,74 @@ class TrackerValidationMixin:
     def validate_frequency(self, attrs, require_end_date):
         frequency = attrs.get("frequency_type", getattr(self.instance, "frequency_type", None))
         end_date = attrs.get("end_date", getattr(self.instance, "end_date", None))
-        day_of_week = attrs.get("day_of_week", getattr(self.instance, "day_of_week", None))
-        day_of_month = attrs.get("day_of_month", getattr(self.instance, "day_of_month", None))
+
+        interval = attrs.get("frequency_interval", getattr(self.instance, "frequency_interval", 1))
+        days = attrs.get("frequency_days", getattr(self.instance, "frequency_days", []))
+        times_per_period = attrs.get("frequency_times_per_period", getattr(self.instance, "frequency_times_per_period", None))
+        period = attrs.get("frequency_period", getattr(self.instance, "frequency_period", None))
+
+        # Back-compat: accept deprecated hourly interval field, map to frequency_interval
         interval_hours = attrs.get("interval_hours", getattr(self.instance, "interval_hours", None))
+        if frequency == "hourly" and (not interval or int(interval) == 1) and interval_hours:
+            attrs["frequency_interval"] = interval_hours
+            interval = interval_hours
 
         if frequency == "once":
             return
+
         if require_end_date and not end_date:
             raise_tracker_error("END_DATE_REQUIRED", "Recurring items require an end date.")
-        if frequency == "weekly" and day_of_week is None:
-            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Weekly frequency requires day_of_week.")
-        if frequency == "monthly" and day_of_month is None:
-            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Monthly frequency requires day_of_month.")
-        if frequency == "hourly" and not interval_hours:
-            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Hourly frequency requires interval_hours.")
-        if day_of_week is not None and day_of_week not in range(0, 7):
-            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "day_of_week must be between 0 and 6.")
-        if day_of_month is not None and day_of_month not in range(1, 32):
-            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "day_of_month must be between 1 and 31.")
+
+        try:
+            interval_int = int(interval or 1)
+        except (TypeError, ValueError):
+            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_interval must be an integer.")
+        if interval_int < 1:
+            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_interval must be >= 1.")
+        attrs["frequency_interval"] = interval_int
+
+        if frequency in {"daily", "weekly", "monthly", "hourly"}:
+            return
+
+        if frequency != "custom":
+            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Invalid frequency_type.")
+
+        has_days = bool(days)
+        has_times = times_per_period is not None
+
+        if has_days and has_times:
+            raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_days and frequency_times_per_period are mutually exclusive.")
+
+        if has_days:
+            if not isinstance(days, list):
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_days must be a list.")
+            normalized = []
+            for d in days:
+                try:
+                    d_int = int(d)
+                except (TypeError, ValueError):
+                    raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_days must contain integers.")
+                if d_int not in range(0, 7) and d_int not in range(1, 32):
+                    raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_days items must be 0–6 (weekday) or 1–31 (day of month).")
+                normalized.append(d_int)
+            attrs["frequency_days"] = normalized
+            return
+
+        if has_times:
+            try:
+                tpp = int(times_per_period)
+            except (TypeError, ValueError):
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_times_per_period must be an integer.")
+            if tpp < 1:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_times_per_period must be >= 1.")
+            if not period:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_period is required when using frequency_times_per_period.")
+            if period not in {"day", "week", "month"}:
+                raise_tracker_error("INVALID_FREQUENCY_CONFIG", "frequency_period must be one of: day, week, month.")
+            attrs["frequency_times_per_period"] = tpp
+            return
+
+        raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Custom frequency requires either frequency_days or frequency_times_per_period.")
 
 
 def is_overdue(instance):
@@ -101,12 +158,31 @@ def is_overdue(instance):
 
 def occurrence_stats(instance):
     if not hasattr(instance, "occurrences"):
-        return {"total": 0, "completed": 0, "missed": 0, "next_occurrence": None}
-    qs = instance.occurrences.all()
+        return {"total": 0, "completed": 0, "missed": 0, "skipped": 0, "next_occurrence": None}
+    qs = instance.occurrences.filter(is_deleted=False, scheduled_date__gte=instance.start_date)
     next_occurrence = qs.filter(scheduled_date__gte=timezone.localdate(), status="pending").order_by("scheduled_date", "scheduled_time").first()
+    missed_count = qs.filter(status="missed").count()
+    now = timezone.localtime()
+    pending_qs = qs.filter(status="pending")
+    computed_missed = 0
+    for o in pending_qs:
+        end_t = o.schedule_end_time or o.scheduled_time
+        if end_t is None:
+            continue
+        deadline = timezone.make_aware(
+            datetime.combine(o.scheduled_date, end_t),
+            timezone.get_current_timezone(),
+        )
+        if deadline < now:
+            computed_missed += 1
+
+    # avoid double-count (persisted + computed pending overdue)
+    final_missed_count = missed_count + computed_missed
+
     return {
         "total": qs.count(),
         "completed": qs.filter(status="completed").count(),
-        "missed": qs.filter(status="missed").count(),
+        "missed": final_missed_count,
+        "skipped": qs.filter(status="skipped").count(),
         "next_occurrence": next_occurrence,
     }

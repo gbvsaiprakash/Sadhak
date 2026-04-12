@@ -78,7 +78,7 @@ class GoalListSerializer(serializers.ModelSerializer):
 
 
 class GoalDetailSerializer(GoalListSerializer):
-    milestones = MilestoneListSerializer(many=True, read_only=True)
+    milestones = serializers.SerializerMethodField()
     tasks = serializers.SerializerMethodField()
     habits = serializers.SerializerMethodField()
     all_tasks = serializers.SerializerMethodField()
@@ -107,6 +107,10 @@ class GoalDetailSerializer(GoalListSerializer):
             "updated_at",
         )
         read_only_fields = ("user", "achieved_date", "created_at", "updated_at")
+    
+    def get_milestones(self, obj):
+        queryset = obj.milestones.filter(is_deleted=False)
+        return MilestoneListSerializer(queryset, many=True, context=self.context).data
 
     def get_tasks(self, obj):
         queryset = obj.tasks.filter(is_deleted=False,milestone__isnull=True)

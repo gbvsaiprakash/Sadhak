@@ -58,7 +58,15 @@ class TrackerAPIViewMixin(AuthenticatedAPIView):
         return self.queryset
 
     def get_serializer_class(self):
-        return self.serializer_class or self.detail_serializer_class
+        # return self.serializer_class or self.detail_serializer_class
+        serializer_class = getattr(self, "serializer_class", None) or getattr(self, "detail_serializer_class", None)
+        if serializer_class is None:
+            raise AssertionError(
+                f"{self.__class__.__name__} must define serializer_class "
+                f"or detail_serializer_class."
+            )
+        return serializer_class
+
 
     def get_serializer(self, *args, **kwargs):
         serializer_class = self.get_serializer_class()
