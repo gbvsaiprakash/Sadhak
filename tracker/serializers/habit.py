@@ -319,8 +319,6 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
     @transaction.atomic
     def create(self, validated_data):
-        override = validated_data.pop("conflict_override", False)
-        reason = validated_data.pop("conflict_override_reason", None)
 
         validated_data["user"] = self.context["request"].user
         validated_data["is_habit"] = True
@@ -330,7 +328,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
         # check_entity_schedule_conflicts(draft.user, draft)
         try:
-            check_entity_schedule_conflicts(draft.user, draft, allow_habit_habit_override=False)
+            check_entity_schedule_conflicts(draft.user, draft, allow_habit_habit_override=override)
         except Exception as exc:
             code = getattr(exc, "code", None)
             if code != "HABIT_CONFLICT_OVERRIDE_REQUIRED":
@@ -345,8 +343,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         habit.conflict_override = bool(override)
         habit.conflict_override_reason = reason if override else None
         habit.conflict_overridden_at = timezone.now() if override else None
-        habit.conflict_overridden_by = self.context["request"].user if override else None
-        habit.save(update_fields=["conflict_override", "conflict_override_reason", "conflict_overridden_at", "conflict_overridden_by", "updated_at"])
+        habit.save(update_fields=["conflict_override", "conflict_override_reason", "conflict_overridden_at", "updated_at"])
 
         generate_occurrences(habit)
         if habit.milestone:
@@ -377,6 +374,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
                     habit,
                     from_date=effective_from,
                     to_date=to_date,
+                    exclude_id=habit.id,
                     allow_habit_habit_override=False,
                 )
             except Exception as exc:
@@ -396,6 +394,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
                     habit,
                     from_date=effective_from,
                     to_date=to_date,
+                    exclude_id=habit.id,
                     allow_habit_habit_override=True,
                 )
             try:
@@ -407,13 +406,11 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         habit.conflict_override = bool(override)
         habit.conflict_override_reason = reason if override else None
         habit.conflict_overridden_at = timezone.now() if override else None
-        habit.conflict_overridden_by = self.context["request"].user if override else None
         habit.save(
             update_fields=[
                 "conflict_override",
                 "conflict_override_reason",
                 "conflict_overridden_at",
-                "conflict_overridden_by",
                 "updated_at",
             ]
         )
