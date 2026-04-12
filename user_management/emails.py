@@ -174,7 +174,7 @@ def send_email(subject, body, recipient_email, body_type='plain', attachment=Non
         CUSTOM_EMAIL_HOST_PASSWORD = os.getenv("HOST_EMAIL_PASSWORD")
         CUSTOM_EMAIL_HOST = os.getenv("HOST_EMAIL_HOST")
         CUSTOM_EMAIL_PORT = os.getenv("HOST_EMAIL_PORT")
-        print("custom",CUSTOM_EMAIL_HOST, CUSTOM_EMAIL_HOST_USER)
+        # print("custom",CUSTOM_EMAIL_HOST, CUSTOM_EMAIL_HOST_USER)
     else:
         CUSTOM_EMAIL_HOST_USER = email_config.get("default_email")
         CUSTOM_EMAIL_HOST_PASSWORD = email_config.get("default_email_password")
@@ -221,7 +221,7 @@ def send_email(subject, body, recipient_email, body_type='plain', attachment=Non
                 return False,"wrong_email"
         # logger.info(msg=f"Email successfully sent to {recipient_email}", 
         #             extra={"data": {"type":"email_communication","message_data":text}})
-        print(f"Email successfully sent to {recipient_email}")
+        # print(f"Email successfully sent to {recipient_email}")
         return True,"sent"
     except Exception as e:
         # error_logger.error(msg=f"Failed to send email to {recipient_email}", extra={"data": str(e)})

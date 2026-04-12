@@ -1,0 +1,61 @@
+from django.urls import path
+
+from tracker.views import (
+    CalendarCombinedAPIView,
+    CalendarHabitAPIView,
+    CalendarTaskAPIView,
+    GoalDetailAPIView,
+    GoalListAPIView,
+    HabitDetailAPIView,
+    HabitListAPIView,
+    HabitLogAPIView,
+    HabitPauseAPIView,
+    HabitResumeAPIView,
+    HabitStopAPIView,
+    MilestoneDetailAPIView,
+    MilestoneListAPIView,
+    TaskCompleteAPIView,
+    TaskDetailAPIView,
+    TaskListAPIView,
+    TaskSkipAPIView,
+    GoalCancelAPIView,
+    MilestoneCancelAPIView,
+    TaskCancelAPIView,
+    HabitCancelAPIView,
+    TaskOccurrenceContextAPIView,
+    TaskOccurrenceListAPIView,
+    HabitOccurrenceContextAPIView,
+    HabitOccurrenceListAPIView,
+)
+
+urlpatterns = [
+    path("goals/", GoalListAPIView.as_view(), name="tracker-goal-list"),
+    path("goals/<uuid:pk>/", GoalDetailAPIView.as_view(), name="tracker-goal-detail"),
+    path("goals/<uuid:pk>/cancel/", GoalCancelAPIView.as_view(), name="tracker-goal-cancel"),
+    path("goals/<uuid:goal_id>/milestones/", MilestoneListAPIView.as_view(), name="tracker-milestone-list"),
+    path("goals/<uuid:goal_id>/milestones/<uuid:pk>/", MilestoneDetailAPIView.as_view(), name="tracker-milestone-detail"),
+    path("goals/<uuid:goal_id>/milestones/<uuid:pk>/cancel/", MilestoneCancelAPIView.as_view(), name="tracker-milestone-cancel"),
+    path("tasks/", TaskListAPIView.as_view(), name="tracker-task-list"),
+    path("tasks/<uuid:pk>/", TaskDetailAPIView.as_view(), name="tracker-task-detail"),
+    path("tasks/<uuid:pk>/complete/", TaskCompleteAPIView.as_view(), name="tracker-task-complete"),
+    path("tasks/<uuid:pk>/skip/", TaskSkipAPIView.as_view(), name="tracker-task-skip"),
+    path("tasks/<uuid:pk>/cancel/", TaskCancelAPIView.as_view(), name="tracker-task-cancel"),
+    path("habits/", HabitListAPIView.as_view(), name="tracker-habit-list"),
+    path("habits/<uuid:pk>/", HabitDetailAPIView.as_view(), name="tracker-habit-detail"),
+    path("habits/<uuid:pk>/pause/", HabitPauseAPIView.as_view(), name="tracker-habit-pause"),
+    path("habits/<uuid:pk>/resume/", HabitResumeAPIView.as_view(), name="tracker-habit-resume"),
+    path("habits/<uuid:pk>/stop/", HabitStopAPIView.as_view(), name="tracker-habit-stop"),
+    path("habits/<uuid:pk>/log/", HabitLogAPIView.as_view(), name="tracker-habit-log"),
+    path("habits/<uuid:pk>/cancel/", HabitCancelAPIView.as_view(), name="tracker-habit-cancel"),
+
+    # Occurrence context
+    path("tasks/<uuid:task_id>/occurrences/", TaskOccurrenceListAPIView.as_view(), name="tracker-task-occurrences"),
+    path("tasks/<uuid:task_id>/occurrences/<uuid:pk>/context/", TaskOccurrenceContextAPIView.as_view(), name="tracker-task-occurrence-context"),
+    path("habits/<uuid:habit_id>/occurrences/", HabitOccurrenceListAPIView.as_view(), name="tracker-habit-occurrences"),
+    path("habits/<uuid:habit_id>/occurrences/<uuid:pk>/context/", HabitOccurrenceContextAPIView.as_view(), name="tracker-habit-occurrence-context"),
+
+    # Calendar
+    path("calendar/tasks/", CalendarTaskAPIView.as_view(), name="tracker-calendar-tasks"),
+    path("calendar/habits/", CalendarHabitAPIView.as_view(), name="tracker-calendar-habits"),
+    path("calendar/", CalendarCombinedAPIView.as_view(), name="tracker-calendar-combined"),
+]

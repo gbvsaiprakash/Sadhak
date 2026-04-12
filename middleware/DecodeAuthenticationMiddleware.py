@@ -165,7 +165,15 @@ class DebugAuthenticationMiddleware:
         if request.get_full_path() in ["api/user/login/", "/api/user/token/refresh/"]:
             log_data["request_data"] = None
         if log_data["status"] >= 400 and request.get_full_path() not in ["/APIDocumentation/","/"]:
-            log_data["response_data"] = json.dumps(response.data,default=str)
+            if hasattr(response, "data"):
+                log_data["response_data"] = json.dumps(response.data, default=str)
+            else:
+                try:
+                    log_data["response_data"] = response.content.decode("utf-8")
+                except Exception as e:
+                    print("Error decoding response content", str(e),str(response))
+                    log_data["response_data"] = None
+        
         log = AuditLog.objects.create(
             user=user,
             action=log_data.get("action",""),

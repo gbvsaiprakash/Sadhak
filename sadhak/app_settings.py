@@ -5,7 +5,6 @@ import os
 load_dotenv()
 
 # Access the variables
-database_url = os.getenv("DATABASE_URL")
 access_token_seconds = int(os.getenv('ACCESS_TOKEN_TTL_SECONDS'))
 refresh_token_seconds = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS"))
 access_token_cookie = os.getenv("ACCESS_TOKEN_COOKIE")
@@ -21,4 +20,5 @@ SCOPE_EMAIL_VERIFY = os.getenv("SCOPE_EMAIL_VERIFY")
 SCOPE_PASSWORD_RESET = os.getenv("SCOPE_PASSWORD_RESET")
 SCOPE_SETUP_PASSWORD = os.getenv("SCOPE_SETUP_PASSWORD")
 SCOPE_ACCOUNT_DELETE = os.getenv("SCOPE_ACCOUNT_REMOVE")
+refresh_token_path = os.getenv("REFRESH_PATH")
 

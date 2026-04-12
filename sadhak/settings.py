@@ -29,7 +29,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False if os.environ.get("DEBUG",True) in ["False",False] else True
+DEBUG = False if os.environ.get("DEBUG",True) in ["False", "false", False] else True
 
 ALLOWED_HOSTS = ["*"]
 
@@ -49,13 +49,14 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist', # Simple JWT token blacklist app (for revoking refresh tokens)
     'corsheaders', # needed if frontend is on other origin
     'user_management',
+    'tracker',
 
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware', # should be before CommomMiddleware so headers are added before response processing and should be first in listing
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware', # should be before CommomMiddleware so headers are added before response processing
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -98,10 +99,10 @@ WSGI_APPLICATION = 'sadhak.wsgi.application'
 DATABASES = {
     "default": {
         "ENGINE": os.getenv("DB_ENGINE"),
-        "NAME": os.getenv("DATABASE_NAME"),
-        "USER": os.getenv("DATABASE_USER"),
-        "PASSWORD": os.getenv("DATABASE_PASSWORD"),
-        "HOST": os.getenv("DB_HOST"),
+        "NAME": os.getenv("POSTGRES_DB"),
+        "USER": os.getenv("POSTGRES_USER"),
+        "PASSWORD": os.getenv("POSTGRES_PASSWORD"),
+        "HOST": os.getenv("DB_HOST", "127.0.0.1"),
         "PORT": os.getenv("DB_PORT"),
     }
 }
@@ -181,7 +182,12 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOWED_ORIGINS = [
+    os.getenv("frontend_url_numeric"),
+    os.getenv("frontend_url"),
+
+]
 CORS_ALLOW_CREDENTIALS = True
 
 

@@ -21,7 +21,7 @@ from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from django.middleware.csrf import get_token
 from user_management.emails import send_email,account_registration_template_html,password_reset_template_html,account_deletion_template_html
-
+import os
 from .authentication import TokenCookieAuthentication
 from .throttles import (
     ForgotPasswordIdentifierRateThrottle,
@@ -47,7 +47,7 @@ from sadhak.app_settings import (
     SCOPE_EMAIL_VERIFY,
     SCOPE_PASSWORD_RESET,
     SCOPE_SETUP_PASSWORD,
-    SCOPE_ACCOUNT_DELETE
+    refresh_token_path,
 )
 from .models import OTPVerification, User
 
@@ -506,7 +506,6 @@ class DeleteOTPRequestAPIView(AuthenticatedAPIView):
             {"message": f"An OTP has been sent to registered Email Address"},
             status=status.HTTP_200_OK,
         )
-        get_token(request)
         logger.info("account_deletion_otp_issued user_id=%s", user.user_id)
         return response
 
@@ -968,22 +967,22 @@ def _password_check(password):
 def _set_auth_cookies(response, access_token=None, refresh_token=None, access_token_expiry=None,refresh_token_expiry=None):
     if access_token:
         max_age = int(access_token_expiry) if access_token_expiry is not None else _access_lifetime_seconds()
-        _set_cookie(response, access_token_cookie, access_token, max_age)
+        _set_cookie(response, access_token_cookie, access_token, max_age, None)
     if refresh_token:
         max_age = int(refresh_token_expiry) if refresh_token_expiry is not None else _refresh_lifetime_seconds()
-        _set_cookie(response, refresh_token_cookie, refresh_token, max_age)
+        _set_cookie(response, refresh_token_cookie, refresh_token, max_age, refresh_token_path)
     
 
 
-def _set_cookie(response, key, token, max_age):
+def _set_cookie(response, key, token, max_age,path):
     response.set_cookie(
         key=key,
         value=token,
         max_age=max_age,
         httponly=True,
         secure=not settings.DEBUG,
-        samesite="Lax",
-        path="/",
+        samesite=os.getenv("SAME_SITE_COOKIE"),
+        path=path or "/",
     )
 
 
