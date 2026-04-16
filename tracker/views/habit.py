@@ -6,6 +6,7 @@ from tracker.models import Habit, TaskOccurrence
 from tracker.serializers import HabitDetailSerializer, HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, generate_occurrences, mark_occurrence
 from tracker.views.mixins import TrackerAPIViewMixin
+from tracker.services.dependency import ensure_not_depended_on
 
 
 class HabitBaseAPIView(TrackerAPIViewMixin):
@@ -26,6 +27,7 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
         return self.get_object(self.get_queryset(), id=pk)
     
     def stop_habit(self, habit, is_deleted=False):
+        ensure_not_depended_on(habit)
         habit.status = "stopped"
         habit.is_deleted = is_deleted
         habit.save(update_fields=["status", "is_deleted", "updated_at"])

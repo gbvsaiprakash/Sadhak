@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from tracker.constants import RESOLVED_OCCURRENCE_STATUSES
 from tracker.models import TaskOccurrence
-
+from tracker.services.dependency import ensure_dependencies_completed_for_occurrence
 
 def _occurrence_model_fields(entity):
     if entity.is_habit:
@@ -499,6 +499,8 @@ def reconcile_occurrences(entity, window_from, window_to=None):
 def mark_occurrence(entity, occurrence, status_value, notes=None):
     if occurrence is None:
         return None
+    if status_value.lower() == "completed":
+        ensure_dependencies_completed_for_occurrence(entity, occurrence.scheduled_date)
     occurrence.status = status_value
     occurrence.notes = notes or occurrence.notes
     occurrence.completed_at = timezone.now() if status_value == "completed" else None

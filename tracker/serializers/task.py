@@ -15,6 +15,11 @@ from tracker.services import (
     regenerate_future_occurrences,
     reconcile_occurrences,
 )
+from tracker.services.dependency import get_dependencies, set_dependencies
+
+class DependencyItemSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=["task", "habit"])
+    id = serializers.UUIDField()
 
 
 class TaskOccurrenceSerializer(serializers.ModelSerializer):
@@ -70,6 +75,8 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     completed_occurrences = serializers.SerializerMethodField()
     missed_occurrences = serializers.SerializerMethodField()
     skipped_occurrences = serializers.SerializerMethodField()
+    dependencies = DependencyItemSerializer(many=True, write_only=True, required=False)
+    dependency_items = serializers.SerializerMethodField(read_only=True)
 
     SCHEDULE_FIELDS = {
         "frequency_type",
@@ -119,6 +126,8 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             "missed_occurrences",
             "skipped_occurrences",
             "occurrences",
+            "dependencies",
+            "dependency_items",
             "created_at",
             "updated_at",
         )
@@ -309,6 +318,9 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             raise_tracker_error("INVALID_TIME_WINDOW", "end_time must be after start_time.")
         return attrs
 
+    def get_dependency_items(self, obj):
+        return get_dependencies(obj)
+    
     def get_total_occurrences(self, obj):
         return occurrence_stats(obj)["total"]
 
@@ -333,9 +345,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     def create(self, validated_data):
         validated_data["user"] = self.context["request"].user
         validated_data["is_habit"] = False
+        deps = validated_data.pop("dependencies", None)
         draft = Task(**validated_data)
         check_entity_schedule_conflicts(draft.user, draft)
         task = super().create(validated_data)
+        if deps is not None:
+            set_dependencies(task, deps, self.context["request"].user)
         generate_occurrences(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
@@ -347,10 +362,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     def update(self, instance, validated_data):
         if instance.status == "cancelled":
             raise_tracker_error("CANNOT_MODIFY_CANCELLED", "Cancelled tasks cannot be modified.")
-
+        deps = validated_data.pop("dependencies", None)
         schedule_changed = any(f in validated_data for f in self.SCHEDULE_FIELDS)
         old_instance = Task.objects.get(pk=instance.pk)
         task = super().update(instance, validated_data)
+        if deps is not None:
+            set_dependencies(task, deps, self.context["request"].user)
 
         if schedule_changed:
             from_date, to_date = self._get_schedule_window(old_instance, task, validated_data)

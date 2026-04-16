@@ -15,6 +15,11 @@ from tracker.services import (
     regenerate_future_occurrences,
     reconcile_occurrences,
 )
+from tracker.services.dependency import get_dependencies, set_dependencies
+
+class DependencyItemSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=["task", "habit"])
+    id = serializers.UUIDField()
 
 
 class HabitOccurrenceSerializer(serializers.ModelSerializer):
@@ -66,6 +71,8 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     missed_occurrences = serializers.SerializerMethodField()
     conflict_override = serializers.BooleanField(write_only=True, required=False, default=False)
     conflict_override_reason = serializers.CharField(write_only=True, required=False, allow_blank=False)
+    dependencies = DependencyItemSerializer(many=True, write_only=True, required=False)
+    dependency_items = serializers.SerializerMethodField(read_only=True)
 
 
     SCHEDULE_FIELDS = {
@@ -114,6 +121,8 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             "completed_occurrences",
             "missed_occurrences",
             "occurrences",
+            "dependencies",
+            "dependency_items",
             "created_at",
             "updated_at",
             "conflict_override",
@@ -300,6 +309,9 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             raise_tracker_error("INVALID_TIME_WINDOW", "end_time must be after start_time.")
         return attrs
 
+    def get_dependency_items(self, obj):
+        return get_dependencies(obj)
+    
     def get_total_occurrences(self, obj):
         return occurrence_stats(obj)["total"]
 
@@ -325,6 +337,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         draft = Habit(**validated_data)
         override = validated_data.pop("conflict_override", False)
         reason = validated_data.pop("conflict_override_reason", None)
+        deps = validated_data.pop("dependencies", None)
 
         # check_entity_schedule_conflicts(draft.user, draft)
         try:
@@ -340,6 +353,8 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             check_entity_schedule_conflicts(draft.user, draft, allow_habit_habit_override=True)
 
         habit = super().create(validated_data)
+        if deps is not None:
+            set_dependencies(habit, deps, self.context["request"].user)
         habit.conflict_override = bool(override)
         habit.conflict_override_reason = reason if override else None
         habit.conflict_overridden_at = timezone.now() if override else None
@@ -359,10 +374,12 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
         override = validated_data.pop("conflict_override", False)
         reason = validated_data.pop("conflict_override_reason", None)
-
+        deps = validated_data.pop("dependencies", None)
         schedule_changed = any(f in validated_data for f in self.SCHEDULE_FIELDS)
         old_instance = Habit.objects.get(pk=instance.pk)
         habit = super().update(instance, validated_data)
+        if deps is not None:
+            set_dependencies(habit, deps, self.context["request"].user)
 
         if schedule_changed:
             from_date, to_date = self._get_schedule_window(old_instance, habit, validated_data)

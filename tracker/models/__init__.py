@@ -3,5 +3,6 @@ from tracker.models.habit import Habit
 from tracker.models.milestone import Milestone
 from tracker.models.occurrence import TaskOccurrence
 from tracker.models.task import Task
+from tracker.models.dependency import TrackerDependency
 
-__all__ = ["Goal", "Milestone", "Task", "Habit", "TaskOccurrence"]
+__all__ = ["Goal", "Milestone", "Task", "Habit", "TaskOccurrence", "TrackerDependency"]

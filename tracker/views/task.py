@@ -5,6 +5,7 @@ from tracker.models import Task, TaskOccurrence
 from tracker.serializers import TaskDetailSerializer, TaskListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, mark_occurrence, sync_task_status_from_occurrences
 from tracker.views.mixins import TrackerAPIViewMixin
+from tracker.services.dependency import ensure_not_depended_on
 
 
 class TaskBaseAPIView(TrackerAPIViewMixin):
@@ -25,6 +26,7 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
         return self.get_object(self.get_queryset(), id=pk)
 
     def cancel_task(self, task):
+        ensure_not_depended_on(task)
         TaskOccurrence.objects.filter(task=task, status="pending").update(
             status="cancelled",
             updated_at=timezone.now(),
@@ -37,6 +39,7 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
             check_goal_completion(task.goal)
     
     def delete_task(self, task):
+        ensure_not_depended_on(task)
         task.is_deleted = True
         task.save(update_fields=["is_deleted", "updated_at"])
         if task.milestone:
