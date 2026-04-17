@@ -6,7 +6,7 @@ from tracker.models import Habit, TaskOccurrence
 from tracker.serializers import HabitDetailSerializer, HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, generate_occurrences, mark_occurrence
 from tracker.views.mixins import TrackerAPIViewMixin
-from tracker.services.dependency import ensure_not_depended_on
+from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates
 
 
 class HabitBaseAPIView(TrackerAPIViewMixin):
@@ -41,6 +41,13 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
         if habit.goal:
             check_goal_completion(habit.goal)
 
+class HabitDependencyCandidatesAPIView(HabitBaseAPIView):
+    def get(self, request, pk):
+        habit = self.get_habit(pk)
+        return Response(
+            {"error": "False", "data": list_dependency_candidates(habit, request.user)},
+            status=status.HTTP_200_OK,
+        )
 
 class HabitListAPIView(HabitBaseAPIView):
     def get_serializer_class(self):

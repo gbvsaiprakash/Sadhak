@@ -1,7 +1,7 @@
 from tracker.views.goal import GoalDetailAPIView, GoalListAPIView, GoalCancelAPIView
-from tracker.views.habit import HabitDetailAPIView, HabitListAPIView, HabitLogAPIView, HabitPauseAPIView, HabitResumeAPIView, HabitStopAPIView, HabitCancelAPIView
+from tracker.views.habit import HabitDetailAPIView, HabitListAPIView, HabitLogAPIView, HabitPauseAPIView, HabitResumeAPIView, HabitStopAPIView, HabitCancelAPIView, HabitDependencyCandidatesAPIView
 from tracker.views.milestone import MilestoneDetailAPIView, MilestoneListAPIView, MilestoneCancelAPIView
-from tracker.views.task import TaskCompleteAPIView, TaskDetailAPIView, TaskListAPIView, TaskSkipAPIView, TaskCancelAPIView
+from tracker.views.task import TaskCompleteAPIView, TaskDetailAPIView, TaskListAPIView, TaskSkipAPIView, TaskCancelAPIView, TaskDependencyCandidatesAPIView
 from tracker.views.occurrence import (
     HabitOccurrenceContextAPIView,
     HabitOccurrenceListAPIView,
@@ -30,9 +30,11 @@ __all__ = [
     "TaskCancelAPIView",
     "HabitCancelAPIView",
     "TaskOccurrenceListAPIView",
+    "TaskDependencyCandidatesAPIView",
     "TaskOccurrenceContextAPIView",
     "HabitOccurrenceListAPIView",
     "HabitOccurrenceContextAPIView",
+    "HabitDependencyCandidatesAPIView",
     "CalendarTaskAPIView",
     "CalendarHabitAPIView",
     "CalendarCombinedAPIView",

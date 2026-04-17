@@ -5,7 +5,7 @@ from tracker.models import Task, TaskOccurrence
 from tracker.serializers import TaskDetailSerializer, TaskListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, mark_occurrence, sync_task_status_from_occurrences
 from tracker.views.mixins import TrackerAPIViewMixin
-from tracker.services.dependency import ensure_not_depended_on
+from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates
 
 
 class TaskBaseAPIView(TrackerAPIViewMixin):
@@ -48,6 +48,13 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
             check_goal_completion(task.goal)
     
 
+class TaskDependencyCandidatesAPIView(TaskBaseAPIView):
+    def get(self, request, pk):
+        task = self.get_task(pk)
+        return Response(
+            {"error": "False", "data": list_dependency_candidates(task, request.user)},
+            status=status.HTTP_200_OK,
+        )
 
 
 class TaskListAPIView(TaskBaseAPIView):
