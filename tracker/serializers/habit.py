@@ -73,6 +73,10 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     conflict_override_reason = serializers.CharField(write_only=True, required=False, allow_blank=False)
     dependencies = DependencyItemSerializer(many=True, write_only=True, required=False)
     dependency_items = serializers.SerializerMethodField(read_only=True)
+    duration_value = serializers.IntegerField(write_only=True, required=False, min_value=1)
+    duration_unit = serializers.ChoiceField(write_only=True, required=False, choices=("minutes", "hours"))
+    duration = serializers.SerializerMethodField(read_only=True)
+
 
 
     SCHEDULE_FIELDS = {
@@ -85,6 +89,9 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         "end_date",
         "start_time",
         "end_time",
+        "duration_value",
+        "duration_unit",
+        "duration",
         "day_of_week",
         "day_of_month",
         "interval_hours",
@@ -110,6 +117,9 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             "frequency_period",
             "start_time",
             "end_time",
+            "duration_value",
+            "duration_unit",
+            "duration",
             "day_of_week",
             "day_of_month",
             "interval_hours",
@@ -137,6 +147,29 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         if self.instance is not None:
             return getattr(self.instance, key, default)
         return default
+    
+    def get_duration(self, obj):
+        cfg = obj.duration_config or {"value": 30, "unit": "minutes"}
+        return {"value": int(cfg.get("value", 30)), "unit": cfg.get("unit", "minutes")}
+
+    def _effective_duration_config(self, attrs):
+        v = attrs.pop("duration_value", None)
+        u = attrs.pop("duration_unit", None)
+
+        if v is not None and u is None:
+            raise_tracker_error("INVALID_DURATION", "duration_unit is required when duration_value is provided.")
+        if u is not None and v is None:
+            raise_tracker_error("INVALID_DURATION", "duration_value is required when duration_unit is provided.")
+
+        if v is not None and u is not None:
+            attrs["duration_config"] = {"value": int(v), "unit": u}
+            return
+
+        if self.instance is not None and getattr(self.instance, "duration_config", None):
+            attrs["duration_config"] = self.instance.duration_config
+        else:
+            attrs["duration_config"] = {"value": 30, "unit": "minutes"}
+
 
     def _normalize_days(self, raw_days, frequency_type):
         if not raw_days:
@@ -270,6 +303,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         self.validate_active_parents(attrs)
         self._normalize_frequency_payload(attrs)
         self.validate_frequency(attrs, require_end_date=False)
+        self._effective_duration_config(attrs)
         self.validate_time_window(attrs)
         if self._effective(attrs, "frequency_type") == "once":
             raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Habits must be recurring and cannot use once frequency.")
@@ -282,12 +316,12 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         goal = attrs.get("goal")
         if goal and goal.status == "cancelled":
             raise_tracker_error("GOAL_CANCELLED", "Cannot assign a cancelled goal to a habit.")
-    
-    def _default_end_time(self, start_time):
-        dt = datetime.combine(date.today(), start_time) + timedelta(hours=1)
-        if dt.date() != date.today():
-            return datetime.combine(date.today(), datetime.max.time().replace(hour=23, minute=59, second=0, microsecond=0)).time()
-        return dt.time().replace(second=0, microsecond=0)
+
+    # def _default_end_time(self, start_time):
+    #     dt = datetime.combine(date.today(), start_time) + timedelta(hours=1)
+    #     if dt.date() != date.today():
+    #         return datetime.combine(date.today(), datetime.max.time().replace(hour=23, minute=59, second=0, microsecond=0)).time()
+    #     return dt.time().replace(second=0, microsecond=0)
 
     def validate_time_window(self, attrs):
         start_time = attrs.get("start_time", getattr(self.instance, "start_time", None))
@@ -295,9 +329,29 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
         if start_time is None:
             raise_tracker_error("START_TIME_REQUIRED", "start_time is required.")
-        if not end_time:
-            end_time = self._default_end_time(start_time)
-            attrs["end_time"] = end_time
+        if end_time is None:
+            return attrs
+        # if not end_time:
+        #     end_time = self._default_end_time(start_time)
+        #     attrs["end_time"] = end_time
+        cfg = attrs.get("duration_config") or getattr(self.instance, "duration_config", None) or {"value": 30, "unit": "minutes"}
+        try:
+            value = int(cfg.get("value", 30) or 30)
+        except (TypeError, ValueError):
+            raise_tracker_error("INVALID_DURATION", "duration value must be a positive integer.")
+        unit = str(cfg.get("unit", "minutes")).lower()
+
+        if value < 1 or unit not in {"minutes", "hours"}:
+            raise_tracker_error("INVALID_DURATION", "duration must be valid (minutes/hours) and >= 1.")
+
+        mins = value * 60 if unit == "hours" else value
+        start_dt = datetime.combine(timezone.localdate(), start_time)
+        end_dt = start_dt + timedelta(minutes=mins)
+        if end_dt.date() != start_dt.date():
+            raise_tracker_error(
+                "INVALID_DURATION",
+                "This start_time and duration crosses midnight. Please reduce duration or change start_time.",
+            )
         if end_time < start_time:
             # If client sent +1h and wrapped past midnight (e.g., 23:30 -> 00:30),
             # cap to end-of-day for same-day schedule semantics.

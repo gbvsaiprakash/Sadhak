@@ -2,7 +2,54 @@ from django.db.models import Q
 from django.utils import timezone
 from tracker.models.occurrence import TaskOccurrence
 from tracker.constants import ACTIVE_GOAL_STATUSES, ACTIVE_HABIT_STATUSES, ACTIVE_TASK_STATUSES, RESOLVED_OCCURRENCE_STATUSES
+from datetime import datetime, timedelta
 
+def _duration_minutes_from_parent(parent):
+    cfg = getattr(parent, "duration_config", None) or {}
+    value = int(cfg.get("value", 30) or 30)
+    unit = (cfg.get("unit") or "minutes").lower()
+    return value * 60 if unit == "hours" else value
+
+
+def _fallback_end_time_from_duration(occ, parent):
+    start_t = occ.scheduled_time or getattr(parent, "start_time", None)
+    if start_t is None:
+        return None
+    mins = _duration_minutes_from_parent(parent)
+    dt = datetime.combine(occ.scheduled_date, start_t) + timedelta(minutes=mins)
+    day_end = datetime.combine(occ.scheduled_date, datetime.max.time().replace(hour=23, minute=59, second=0, microsecond=0))
+    if dt > day_end:
+        dt = day_end
+    return dt.time().replace(second=0, microsecond=0)
+
+
+def _occurrence_deadline(occ):
+    parent = occ.task or occ.habit
+    if parent is None:
+        return None
+
+    end_t = occ.schedule_end_time
+    if end_t is None:
+        end_t = _fallback_end_time_from_duration(occ, parent)
+    if end_t is None:
+        return None
+
+    return timezone.make_aware(
+        datetime.combine(occ.scheduled_date, end_t),
+        timezone.get_current_timezone(),
+    )
+
+def mark_overdue_pending_occurrences(qs):
+    now = timezone.localtime()
+    ids = []
+
+    for occ in qs.filter(is_deleted=False, status="pending").select_related("task", "habit"):
+        deadline = _occurrence_deadline(occ)
+        if deadline and deadline < now:
+            ids.append(occ.id)
+
+    if ids:
+        TaskOccurrence.objects.filter(id__in=ids).update(status="missed", updated_at=timezone.now())
 
 def calculate_completion_percentage(children):
     items = list(children)
@@ -17,6 +64,9 @@ def task_is_complete(task):
         return True
     if task.frequency_type == "once":
         return False
+    
+    mark_overdue_pending_occurrences(task.occurrences.all())
+
     unresolved = task.occurrences.filter(scheduled_date__gte=timezone.localdate()).exclude(status__in=RESOLVED_OCCURRENCE_STATUSES).exists()
     if unresolved:
         return False
@@ -134,6 +184,7 @@ def check_milestone_completion(milestone):
 def sync_task_status_from_occurrences(task):
     if task.frequency_type == "once":
         return task
+    mark_overdue_pending_occurrences(task.occurrences.all())
     unresolved_exists = task.occurrences.exclude(status__in=RESOLVED_OCCURRENCE_STATUSES).exists()
     if not unresolved_exists:
         task.status = "completed"

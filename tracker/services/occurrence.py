@@ -19,6 +19,17 @@ def _safe_time(t):
         return None
     return t.replace(second=0, microsecond=0)
 
+def _duration_minutes(entity):
+    cfg = getattr(entity, "duration_config", None) or {}
+    value = int(cfg.get("value", 30) or 30)
+    unit = (cfg.get("unit") or "minutes").lower()
+    return value * 60 if unit == "hours" else value
+
+def _compute_occurrence_end_time(start_t, duration_mins):
+    dt = datetime.combine(timezone.localdate(), start_t) + timedelta(minutes=duration_mins)
+    if dt.date() != timezone.localdate():
+        return time(23, 59, 59)
+    return dt.time().replace(second=0, microsecond=0)
 
 def _entity_duration(entity):
     """
@@ -186,51 +197,93 @@ def _generate_dates(entity, start_date, end_date):
 
 #     return [start_time]
 
+# def _generate_times_for_date(entity, scheduled_date):
+#     freq = entity.frequency_type
+#     start_time = _safe_time(entity.start_time)
+#     end_time = _safe_time(entity.end_time)  # can be None
+
+#     def slot_end(t):
+#         return end_time if end_time else None
+
+#     if freq != "custom":
+#         if freq != "hourly":
+#             return [(start_time, slot_end(start_time))]
+
+#         interval = max(int(getattr(entity, "frequency_interval", 1) or 1), 1)
+#         current = datetime.combine(scheduled_date, start_time)
+#         day_end = datetime.combine(scheduled_date, end_time or time(23, 59))
+#         slots = []
+#         while current <= day_end:
+#             t = current.time().replace(second=0, microsecond=0)
+#             slots.append((t, slot_end(t)))
+#             current += timedelta(hours=interval)
+#         return slots
+
+#     if entity.frequency_times_per_period and entity.frequency_period:
+#         k = int(entity.frequency_times_per_period)
+#         if k <= 0:
+#             return [(start_time, slot_end(start_time))]
+
+#         if entity.frequency_period == "day":
+#             if k == 1:
+#                 return [(start_time, slot_end(start_time))]
+#             start_dt = datetime.combine(scheduled_date, start_time)
+#             end_dt = datetime.combine(scheduled_date, end_time or time(23, 59))
+#             window = end_dt - start_dt
+#             if window <= timedelta(minutes=0):
+#                 return [(start_time, slot_end(start_time))]
+#             step = window / k
+#             slots = []
+#             for i in range(k):
+#                 t = (start_dt + (step * i)).time().replace(second=0, microsecond=0)
+#                 slots.append((t, slot_end(t)))
+#             return slots
+
+#         return [(start_time, slot_end(start_time))]
+
+#     return [(start_time, slot_end(start_time))]
 def _generate_times_for_date(entity, scheduled_date):
     freq = entity.frequency_type
     start_time = _safe_time(entity.start_time)
-    end_time = _safe_time(entity.end_time)  # can be None
-
-    def slot_end(t):
-        return end_time if end_time else None
+    end_time = _safe_time(entity.end_time)  # optional window bound
 
     if freq != "custom":
         if freq != "hourly":
-            return [(start_time, slot_end(start_time))]
+            return [start_time]
 
         interval = max(int(getattr(entity, "frequency_interval", 1) or 1), 1)
         current = datetime.combine(scheduled_date, start_time)
         day_end = datetime.combine(scheduled_date, end_time or time(23, 59))
         slots = []
         while current <= day_end:
-            t = current.time().replace(second=0, microsecond=0)
-            slots.append((t, slot_end(t)))
+            slots.append(current.time().replace(second=0, microsecond=0))
             current += timedelta(hours=interval)
         return slots
 
     if entity.frequency_times_per_period and entity.frequency_period:
         k = int(entity.frequency_times_per_period)
         if k <= 0:
-            return [(start_time, slot_end(start_time))]
+            return [start_time]
 
         if entity.frequency_period == "day":
             if k == 1:
-                return [(start_time, slot_end(start_time))]
+                return [start_time]
             start_dt = datetime.combine(scheduled_date, start_time)
             end_dt = datetime.combine(scheduled_date, end_time or time(23, 59))
             window = end_dt - start_dt
             if window <= timedelta(minutes=0):
-                return [(start_time, slot_end(start_time))]
+                return [start_time]
             step = window / k
             slots = []
             for i in range(k):
                 t = (start_dt + (step * i)).time().replace(second=0, microsecond=0)
-                slots.append((t, slot_end(t)))
-            return slots
+                slots.append(t)
+            return sorted(set(slots))
 
-        return [(start_time, slot_end(start_time))]
+        return [start_time]
 
-    return [(start_time, slot_end(start_time))]
+    return [start_time]
+
 
 
 
@@ -369,6 +422,42 @@ def _generate_custom_period_dates(entity, start_date, end_date):
         return
 
 
+# def generate_occurrences(entity, from_date=None, to_date=None):
+#     start_date = max(entity.start_date, from_date or entity.start_date)
+#     if entity.frequency_type == "once":
+#         end_date = entity.start_date
+#     elif entity.end_date:
+#         end_date = entity.end_date
+#     else:
+#         end_date = timezone.localdate() + timedelta(days=90)
+
+#     if to_date is not None:
+#         end_date = min(end_date, to_date)
+
+#     if end_date < start_date:
+#         return []
+
+#     payloads = []
+#     if entity.frequency_type == "custom" and entity.frequency_times_per_period and entity.frequency_period in {"week", "month"}:
+#         date_iter = _generate_custom_period_dates(entity, start_date, end_date)
+#     else:
+#         date_iter = _generate_dates(entity, start_date, end_date)
+#     for scheduled_date in date_iter:
+#         for scheduled_time, schedule_end_time in _generate_times_for_date(entity, scheduled_date):
+#             payloads.append(
+#                 TaskOccurrence(
+#                     scheduled_date=scheduled_date,
+#                     scheduled_time=scheduled_time,
+#                     schedule_end_time=schedule_end_time,
+#                     duration_mins = _duration_minutes(entity)
+#                     occ_end = _compute_occurrence_end_time(scheduled_time, duration_mins)
+#                     schedule_end_time=occ_end
+
+#                     **_occurrence_model_fields(entity),
+#                 )
+#             )
+#     TaskOccurrence.objects.bulk_create(payloads, ignore_conflicts=True)
+#     return payloads
 def generate_occurrences(entity, from_date=None, to_date=None):
     start_date = max(entity.start_date, from_date or entity.start_date)
     if entity.frequency_type == "once":
@@ -385,22 +474,28 @@ def generate_occurrences(entity, from_date=None, to_date=None):
         return []
 
     payloads = []
+    duration_mins = _duration_minutes(entity)
+
     if entity.frequency_type == "custom" and entity.frequency_times_per_period and entity.frequency_period in {"week", "month"}:
         date_iter = _generate_custom_period_dates(entity, start_date, end_date)
     else:
         date_iter = _generate_dates(entity, start_date, end_date)
+
     for scheduled_date in date_iter:
-        for scheduled_time, schedule_end_time in _generate_times_for_date(entity, scheduled_date):
+        for scheduled_time in _generate_times_for_date(entity, scheduled_date):
+            occ_end = _compute_occurrence_end_time(scheduled_time, duration_mins)
             payloads.append(
                 TaskOccurrence(
                     scheduled_date=scheduled_date,
                     scheduled_time=scheduled_time,
-                    schedule_end_time=schedule_end_time,
+                    schedule_end_time=occ_end,
                     **_occurrence_model_fields(entity),
                 )
             )
+
     TaskOccurrence.objects.bulk_create(payloads, ignore_conflicts=True)
     return payloads
+
 
 
 @transaction.atomic

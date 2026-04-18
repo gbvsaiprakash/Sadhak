@@ -4,6 +4,8 @@ from django.db import models
 from tracker.constants import FREQUENCY_PERIOD_CHOICES, FREQUENCY_TYPE_CHOICES, HABIT_STATUS_CHOICES, SECTION_CHOICES
 from tracker.models.base import UUIDTimeStampedModel
 
+def default_duration_config():
+        return {"value": 30, "unit": "minutes"}
 
 class Habit(UUIDTimeStampedModel):
     user = models.ForeignKey("user_management.User", on_delete=models.CASCADE, related_name="tracker_habits")
@@ -20,6 +22,7 @@ class Habit(UUIDTimeStampedModel):
     frequency_period = models.CharField(max_length=10, choices=FREQUENCY_PERIOD_CHOICES, blank=True, null=True)
     start_time = models.TimeField()
     end_time = models.TimeField(blank=True, null=True)
+    duration_config = models.JSONField(default=default_duration_config, blank=True)
     day_of_week = models.PositiveSmallIntegerField(blank=True, null=True)
     day_of_month = models.PositiveSmallIntegerField(blank=True, null=True)
     interval_hours = models.PositiveSmallIntegerField(blank=True, null=True)
