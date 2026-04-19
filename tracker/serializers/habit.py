@@ -329,11 +329,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
         if start_time is None:
             raise_tracker_error("START_TIME_REQUIRED", "start_time is required.")
-        if end_time is None:
-            return attrs
-        # if not end_time:
-        #     end_time = self._default_end_time(start_time)
-        #     attrs["end_time"] = end_time
+
         cfg = attrs.get("duration_config") or getattr(self.instance, "duration_config", None) or {"value": 30, "unit": "minutes"}
         try:
             value = int(cfg.get("value", 30) or 30)
@@ -352,15 +348,20 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
                 "INVALID_DURATION",
                 "This start_time and duration crosses midnight. Please reduce duration or change start_time.",
             )
-        if end_time < start_time:
-            # If client sent +1h and wrapped past midnight (e.g., 23:30 -> 00:30),
-            # cap to end-of-day for same-day schedule semantics.
-            attrs["end_time"] = datetime.max.time().replace(hour=23, minute=59, second=0, microsecond=0)
-            end_time = attrs["end_time"]
-        if start_time == end_time:
-            raise_tracker_error("INVALID_TIME_WINDOW", "start_time and end_time cannot be the same.")
-        if end_time < start_time:
-            raise_tracker_error("INVALID_TIME_WINDOW", "end_time must be after start_time.")
+        
+        if end_time is None:
+            return attrs
+        
+        start_date = attrs.get("start_date", getattr(self.instance, "start_date", None))
+        end_date = attrs.get("end_date", getattr(self.instance, "end_date", None))
+
+        # only validate absolute schedule window if end_date exists
+        if start_date and end_date:
+            start_dt_abs = datetime.combine(start_date, start_time)
+            end_dt_abs = datetime.combine(end_date, end_time)
+            if end_dt_abs <= start_dt_abs:
+                raise_tracker_error("INVALID_TIME_WINDOW", "Task end boundary must be after task start.")
+
         return attrs
 
     def get_dependency_items(self, obj):
@@ -385,13 +386,12 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
     @transaction.atomic
     def create(self, validated_data):
-
+        deps = validated_data.pop("dependencies", None)
         validated_data["user"] = self.context["request"].user
         validated_data["is_habit"] = True
         draft = Habit(**validated_data)
         override = validated_data.pop("conflict_override", False)
         reason = validated_data.pop("conflict_override_reason", None)
-        deps = validated_data.pop("dependencies", None)
 
         # check_entity_schedule_conflicts(draft.user, draft)
         try:

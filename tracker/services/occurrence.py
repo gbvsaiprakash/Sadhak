@@ -470,6 +470,10 @@ def generate_occurrences(entity, from_date=None, to_date=None):
     if to_date is not None:
         end_date = min(end_date, to_date)
 
+    task_end_dt = None
+    if end_date:
+        task_end_dt = datetime.combine(end_date, _safe_time(entity.end_time) or time(23, 59))
+
     if end_date < start_date:
         return []
 
@@ -484,6 +488,10 @@ def generate_occurrences(entity, from_date=None, to_date=None):
     for scheduled_date in date_iter:
         for scheduled_time in _generate_times_for_date(entity, scheduled_date):
             occ_end = _compute_occurrence_end_time(scheduled_time, duration_mins)
+            slot_start_dt = datetime.combine(scheduled_date, scheduled_time)
+            slot_end_dt = datetime.combine(scheduled_date, occ_end)
+            if task_end_dt and slot_end_dt > task_end_dt:
+                continue
             payloads.append(
                 TaskOccurrence(
                     scheduled_date=scheduled_date,

@@ -5,7 +5,7 @@ from tracker.models import Task, TaskOccurrence
 from tracker.serializers import TaskDetailSerializer, TaskListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, mark_occurrence, sync_task_status_from_occurrences
 from tracker.views.mixins import TrackerAPIViewMixin
-from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates
+from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
 
 
 class TaskBaseAPIView(TrackerAPIViewMixin):
@@ -33,6 +33,7 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
         )
         task.status = "cancelled"
         task.save(update_fields=["status", "updated_at"])
+        soft_delete_owned_dependencies(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:
@@ -42,6 +43,7 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
         ensure_not_depended_on(task)
         task.is_deleted = True
         task.save(update_fields=["is_deleted", "updated_at"])
+        soft_delete_owned_dependencies(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:
@@ -53,6 +55,13 @@ class TaskDependencyCandidatesAPIView(TaskBaseAPIView):
         task = self.get_task(pk)
         return Response(
             {"error": "False", "data": list_dependency_candidates(task, request.user)},
+            status=status.HTTP_200_OK,
+        )
+
+class TaskDependencyCandidatesForCreateAPIView(TaskBaseAPIView):
+    def get(self, request):
+        return Response(
+            {"error": "False", "data": list_dependency_candidates_for_create(request.user)},
             status=status.HTTP_200_OK,
         )
 

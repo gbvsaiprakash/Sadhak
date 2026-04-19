@@ -27,7 +27,9 @@ from tracker.views import (
     HabitOccurrenceContextAPIView,
     HabitOccurrenceListAPIView,
     TaskDependencyCandidatesAPIView,
-    HabitDependencyCandidatesAPIView
+    HabitDependencyCandidatesAPIView,
+    TaskDependencyCandidatesForCreateAPIView,
+    HabitDependencyCandidatesForCreateAPIView,
 )
 
 urlpatterns = [
@@ -43,6 +45,7 @@ urlpatterns = [
     path("tasks/<uuid:pk>/complete/", TaskCompleteAPIView.as_view(), name="tracker-task-complete"),
     path("tasks/<uuid:pk>/skip/", TaskSkipAPIView.as_view(), name="tracker-task-skip"),
     path("tasks/<uuid:pk>/cancel/", TaskCancelAPIView.as_view(), name="tracker-task-cancel"),
+    path("tasks/dependency_candidates/", TaskDependencyCandidatesForCreateAPIView.as_view(), name="tracker-task-dependencies-for-create"),
     path("habits/", HabitListAPIView.as_view(), name="tracker-habit-list"),
     path("habits/<uuid:pk>/", HabitDetailAPIView.as_view(), name="tracker-habit-detail"),
     path("habits/<uuid:pk>/dependency_candidates/", HabitDependencyCandidatesAPIView.as_view(), name="tracker-habit-dependencies"),
@@ -51,7 +54,7 @@ urlpatterns = [
     path("habits/<uuid:pk>/stop/", HabitStopAPIView.as_view(), name="tracker-habit-stop"),
     path("habits/<uuid:pk>/log/", HabitLogAPIView.as_view(), name="tracker-habit-log"),
     path("habits/<uuid:pk>/cancel/", HabitCancelAPIView.as_view(), name="tracker-habit-cancel"),
-
+    path("habits/dependency_candidates/", HabitDependencyCandidatesForCreateAPIView.as_view(), name="tracker-habit-dependencies-for-create"),
     # Occurrence context
     path("tasks/<uuid:task_id>/occurrences/", TaskOccurrenceListAPIView.as_view(), name="tracker-task-occurrences"),
     path("tasks/<uuid:task_id>/occurrences/<uuid:pk>/context/", TaskOccurrenceContextAPIView.as_view(), name="tracker-task-occurrence-context"),

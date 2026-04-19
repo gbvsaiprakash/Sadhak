@@ -329,20 +329,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     def default_duration_config():
         return {"value": 30, "unit": "minutes"}
 
-    # def _default_end_time(self, start_time):
-    #     dt = datetime.combine(date.today(), start_time) + timedelta(hours=1)
-    #     if dt.date() != date.today():
-    #         return datetime.combine(date.today(), datetime.max.time().replace(hour=23, minute=59, second=0, microsecond=0)).time()
-    #     return dt.time().replace(second=0, microsecond=0)
-
     def validate_time_window(self, attrs):
         start_time = attrs.get("start_time", getattr(self.instance, "start_time", None))
         end_time = attrs.get("end_time", getattr(self.instance, "end_time", None))
         if start_time is None:
             raise_tracker_error("START_TIME_REQUIRED", "start_time is required.")
-        # if not end_time:
-        #     end_time = self._default_end_time(start_time)
-        #     attrs["end_time"] = end_time
+        
         cfg = attrs.get("duration_config") or getattr(self.instance, "duration_config", None) or {"value": 30, "unit": "minutes"}
         try:
             value = int(cfg.get("value", 30) or 30)
@@ -363,15 +355,16 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             )
         if end_time is None:
             return attrs
-        if end_time < start_time:
-            # If client sent +1h and wrapped past midnight (e.g., 23:30 -> 00:30),
-            # cap to end-of-day for same-day schedule semantics.
-            attrs["end_time"] = datetime.max.time().replace(hour=23, minute=59, second=59, microsecond=0)
-            end_time = attrs["end_time"]
-        if start_time == end_time:
-            raise_tracker_error("INVALID_TIME_WINDOW", "start_time and end_time cannot be the same.")
-        if end_time < start_time:
-            raise_tracker_error("INVALID_TIME_WINDOW", "end_time must be after start_time.")
+        start_date = attrs.get("start_date", getattr(self.instance, "start_date", None))
+        end_date = attrs.get("end_date", getattr(self.instance, "end_date", None))
+
+        # only validate absolute schedule window if end_date exists
+        if start_date and end_date:
+            start_dt_abs = datetime.combine(start_date, start_time)
+            end_dt_abs = datetime.combine(end_date, end_time)
+            if end_dt_abs <= start_dt_abs:
+                raise_tracker_error("INVALID_TIME_WINDOW", "Task end boundary must be after task start.")
+
         return attrs
 
     def get_dependency_items(self, obj):

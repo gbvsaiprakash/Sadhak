@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from django.db.models import Q
 from dataclasses import dataclass
 from typing import Dict, List, Set, Tuple
 from uuid import UUID
@@ -40,6 +40,11 @@ def _dep_key(dep: TrackerDependency) -> EntityRef:
         return EntityRef("task", dep.depends_on_task_id)
     return EntityRef("habit", dep.depends_on_habit_id)
 
+def soft_delete_owned_dependencies(entity):
+    TrackerDependency.objects.filter(is_deleted=False, **_owner_filter(entity)).update(
+        is_deleted=True,
+        updated_at=timezone.now(),
+    )
 
 def _edge_filter_for_target(ref: EntityRef):
     if ref.kind == "task":
@@ -122,6 +127,44 @@ def get_dependencies(entity):
     # backward compatibility for existing serializers
     return get_dependency_items(entity)
 
+def list_dependency_candidates_for_create(user):
+    tasks = (
+        Task.objects.filter(user=user, is_deleted=False)
+        .exclude(status__in={"cancelled"})
+        .only("id", "title", "status")
+    )
+    habits = (
+        Habit.objects.filter(user=user, is_deleted=False)
+        .exclude(status__in={"stopped"})
+        .only("id", "title", "status")
+    )
+
+    out = []
+    for t in tasks:
+        out.append({
+            "id": str(t.id),
+            "type": "task",
+            "title": t.title,
+            "status": t.status,
+            "is_selected": False,
+            "is_selectable": True,
+            "disable_reason_code": None,
+            "disable_reason_message": None,
+        })
+    for h in habits:
+        out.append({
+            "id": str(h.id),
+            "type": "habit",
+            "title": h.title,
+            "status": h.status,
+            "is_selected": False,
+            "is_selectable": True,
+            "disable_reason_code": None,
+            "disable_reason_message": None,
+        })
+
+    out.sort(key=lambda x: (x["type"], x["title"].lower()))
+    return out
 
 def list_dependency_candidates(entity, user):
     owner_ref = _owner_key(entity)
@@ -271,7 +314,14 @@ def set_dependencies(entity, dependency_payload, user):
 
 def ensure_not_depended_on(entity):
     ref = _owner_key(entity)
-    q = TrackerDependency.objects.filter(is_deleted=False, **_edge_filter_for_target(ref))
+    q = (TrackerDependency.objects.filter(is_deleted=False, **_edge_filter_for_target(ref)).filter(
+            Q(owner_task__isnull=False, owner_task__is_deleted=False) |
+            Q(owner_habit__isnull=False, owner_habit__is_deleted=False)
+        )
+        .exclude(
+            Q(owner_task__isnull=False, owner_task__status__in={"cancelled"}) |
+            Q(owner_habit__isnull=False, owner_habit__status__in={"stopped"})
+        ))
     if q.exists():
         raise_tracker_error(
             "DEPENDENCY_EXISTS",
