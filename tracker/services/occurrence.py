@@ -599,11 +599,12 @@ def reconcile_occurrences(entity, window_from, window_to=None):
 
 
 
-def mark_occurrence(entity, occurrence, status_value, notes=None):
+def mark_occurrence(entity, occurrence, status_value, notes=None, override_dependency=False, override_reason=None):
     if occurrence is None:
         return None
     if status_value.lower() == "completed":
-        ensure_dependencies_completed_for_occurrence(entity, occurrence.scheduled_date)
+        # ensure_dependencies_completed_for_occurrence(entity, occurrence.scheduled_date)
+        ensure_dependencies_completed_for_occurrence(entity, occurrence, override_dependency=override_dependency, override_reason="Not Provided" if override_reason is None else override_reason)
     occurrence.status = status_value
     occurrence.notes = notes or occurrence.notes
     occurrence.completed_at = timezone.now() if status_value == "completed" else None

@@ -329,7 +329,7 @@ def ensure_not_depended_on(entity):
         )
 
 
-def ensure_dependencies_completed_for_occurrence(entity, scheduled_date):
+def ensure_dependencies_completed_for_date_occurrence(entity, scheduled_date):
     deps = TrackerDependency.objects.filter(is_deleted=False, **_owner_filter(entity))
     unmet = []
     for d in deps:
@@ -361,3 +361,135 @@ def ensure_dependencies_completed_for_occurrence(entity, scheduled_date):
             "Complete all dependency occurrences first.",
             details={"unmet_dependencies": unmet},
         )
+
+def ensure_dependencies_completed_for_occurrence(
+    entity,
+    occurrence,
+    override_dependency=False,
+    override_reason=None,
+):
+    """
+    Rules:
+    - hard blockers (pending/in_progress) => immediate DEPENDENCY_NOT_COMPLETED
+    - overrideable blockers (skipped/missed/paused/inactive) =>
+        - if override_dependency=False: DEPENDENCY_OVERRIDE_REQUIRED
+        - if override_dependency=True: allow
+    - only completed satisfies dependency
+    """
+    deps = TrackerDependency.objects.filter(is_deleted=False, **_owner_filter(entity))
+    hard_blockers = []
+    overrideable_blockers = []
+
+    for d in deps:
+        dep_occ_qs = None
+
+        if d.depends_on_task_id:
+            dep = d.depends_on_task
+            dep_type = "task"
+            dep_id = d.depends_on_task_id
+            dep_title = dep.title if dep else "Task"
+
+            # inactive dependency object -> overrideable
+            if dep is None or getattr(dep, "is_deleted", False) or getattr(dep, "status", None) == "cancelled":
+                overrideable_blockers.append({
+                    "id": str(dep_id),
+                    "type": dep_type,
+                    "title": dep_title,
+                    "reason": "DEPENDENCY_INACTIVE",
+                })
+                continue
+
+            dep_occ_qs = TaskOccurrence.objects.filter(
+                task_id=dep_id,
+                scheduled_date=occurrence.scheduled_date,
+                is_deleted=False,
+            ).exclude(status="cancelled")
+
+        else:
+            dep = d.depends_on_habit
+            dep_type = "habit"
+            dep_id = d.depends_on_habit_id
+            dep_title = dep.title if dep else "Habit"
+
+            # paused/inactive dependency object -> overrideable
+            if dep is None or getattr(dep, "is_deleted", False) or getattr(dep, "status", None) == "stopped":
+                overrideable_blockers.append({
+                    "id": str(dep_id),
+                    "type": dep_type,
+                    "title": dep_title,
+                    "reason": "DEPENDENCY_INACTIVE",
+                })
+                continue
+
+            if getattr(dep, "status", None) == "paused":
+                overrideable_blockers.append({
+                    "id": str(dep_id),
+                    "type": dep_type,
+                    "title": dep_title,
+                    "reason": "DEPENDENCY_PAUSED",
+                })
+                continue
+
+            dep_occ_qs = TaskOccurrence.objects.filter(
+                habit_id=dep_id,
+                scheduled_date=occurrence.scheduled_date,
+                is_deleted=False,
+            ).exclude(status="stopped")
+
+        # Due slots only (ignore future slots for current completion)
+        if occurrence.scheduled_time is not None:
+            dep_occ_qs = dep_occ_qs.filter(scheduled_time__lte=occurrence.scheduled_time)
+
+        # no due slot => not due => don't block
+        if not dep_occ_qs.exists():
+            continue
+
+        # completed satisfies dependency
+        if dep_occ_qs.filter(status="completed").exists():
+            continue
+
+        # classify current due dependency state
+        if dep_occ_qs.filter(status__in={"pending", "in_progress"}).exists():
+            hard_blockers.append({
+                "id": str(dep_id),
+                "type": dep_type,
+                "title": dep_title,
+                "reason": "DEPENDENCY_NOT_COMPLETED",
+            })
+            continue
+
+        # skipped/missed/other unresolved -> overrideable
+        overrideable_blockers.append({
+            "id": str(dep_id),
+            "type": dep_type,
+            "title": dep_title,
+            "reason": "DEPENDENCY_OVERRIDEABLE",
+        })
+
+    if hard_blockers:
+        raise_tracker_error(
+            "DEPENDENCY_NOT_COMPLETED",
+            "Complete dependency occurrence(s) first.",
+            details={
+                "hard_blockers": hard_blockers,
+                "overrideable_blockers": overrideable_blockers,
+            },
+        )
+
+    if overrideable_blockers and not override_dependency:
+        raise_tracker_error(
+            "DEPENDENCY_OVERRIDE_REQUIRED",
+            "Dependency can be overridden for this occurrence.",
+            details={
+                "hard_blockers": [],
+                "overrideable_blockers": overrideable_blockers,
+            },
+        )
+
+    # allowed path (either no blockers, or override approved)
+    return {
+        "overridden": bool(overrideable_blockers and override_dependency),
+        "override_reason": (override_reason or "No reason provided"),
+        "hard_blockers": hard_blockers,
+        "overrideable_blockers": overrideable_blockers,
+    }

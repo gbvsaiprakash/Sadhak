@@ -133,7 +133,9 @@ class TaskCompleteAPIView(TaskBaseAPIView):
             occurrence = TaskOccurrence.objects.filter(task=task, id=occurrence_id).first()
             if occurrence is None:
                 return self.finalize_error("TASK_NOT_FOUND", "Task occurrence was not found.")
-            mark_occurrence(task, occurrence, "completed", notes=notes)
+            override_dependency = bool(request.data.get("override_dependency", False))
+            override_reason = request.data.get("override_reason")
+            mark_occurrence(task, occurrence, "completed", notes=notes, override_dependency=override_dependency, override_reason=override_reason)
             sync_task_status_from_occurrences(task)
         else:
             task.status = "completed"

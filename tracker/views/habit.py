@@ -1,5 +1,5 @@
 from django.utils import timezone
-from rest_framework import status
+from rest_framework import request, status
 from rest_framework.response import Response
 
 from tracker.models import Habit, TaskOccurrence
@@ -142,7 +142,9 @@ class HabitLogAPIView(HabitBaseAPIView):
         if occurrence is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit occurrence was not found.")
         status_value = request.data.get("status", "completed")
-        mark_occurrence(habit, occurrence, status_value, notes=request.data.get("notes"))
+        override_dependency = bool(request.data.get("override_dependency", False))
+        override_reason = request.data.get("override_reason")
+        mark_occurrence(habit, occurrence, status_value, notes=request.data.get("notes"), override_dependency=override_dependency, override_reason=override_reason)
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:
