@@ -100,8 +100,6 @@ class RegistrationAPIView(APIView):
         email = (data.get("email") or "").strip().lower()
         first_name = (data.get("first_name") or "").strip()
         last_name = (data.get("last_name") or "").strip()
-        password = data.get("password")
-        confirm_password = data.get("confirm_password")
         gender = data.get("gender")
         age = data.get("age")
 
@@ -110,7 +108,22 @@ class RegistrationAPIView(APIView):
                 {"message": "username, email, first_name are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
+        check_first_name, check_first_name_message = _check_name(first_name)
+        check_last_name, check_last_name_message = _check_name(last_name, "Last")
+        if not check_first_name:
+            return Response({"message": check_first_name_message},status=status.HTTP_400_BAD_REQUEST,)
+        if not check_last_name:
+            return Response({"message": check_last_name_message},status=status.HTTP_400_BAD_REQUEST,)
+        
+        check, check_message = _username_check(username)
+        if not check:
+            return Response({"message": check_message},status=status.HTTP_400_BAD_REQUEST,)
+        
+        if age:
+            check_age, check_age_message = _age_check(age)
+            if not check_age:
+                return Response({"message": check_age_message},status=status.HTTP_400_BAD_REQUEST,)
+        
         # if verified user with username exists
         if User.objects.filter(username__iexact=username, is_email_verified=True, is_deleted=False).exists():
             return Response({"message": "Username is not available"}, status=status.HTTP_400_BAD_REQUEST)
@@ -124,10 +137,11 @@ class RegistrationAPIView(APIView):
                     {
                         "message": "Email already verified. Complete password setup.",
                         "next_step": "setup_password",
+                        "access_token": access_token,
                     },
                     status=status.HTTP_200_OK,
                 )
-                _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
+                # _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
                 return response
             # if all set return email already exists
             return Response({"message": "Email already registered. Please login or reset your password."}, status=status.HTTP_400_BAD_REQUEST)
@@ -298,7 +312,7 @@ class SetupPasswordAPIView(AuthenticatedAPIView):
             _blacklist_request_access_token(request)
 
         access_token, refresh_token = _issue_token_pair(user)
-        response = Response({"message": "Password setup successful","access_token":access_token}, status=status.HTTP_200_OK)
+        response = Response({"message": "Password setup successful", "access_token": access_token}, status=status.HTTP_200_OK)
         _set_auth_cookies(response, access_token=None, refresh_token=refresh_token)
         return response
 
@@ -371,8 +385,9 @@ class LoginAPIView(APIView):
             return Response({"message": "Email is not verified"}, status=status.HTTP_403_FORBIDDEN)
         if not user.is_password_set:
             logger.warning("login_failed_password_not_set user_id=%s", user.user_id)
+            setup_token, _ = _get_or_issue_scoped_access_token(user, SCOPE_SETUP_PASSWORD, setup_expiry)
             return Response(
-                {"message": "Your account does not have a password set yet. Please create a password to continue."},
+                {"message": "Your account does not have a password set yet. Please create a password to continue.", "access_token": setup_token},
                 status=status.HTTP_403_FORBIDDEN,
             )
         
@@ -581,11 +596,11 @@ class PasswordChangeAPIView(AuthenticatedAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if old_password == new_password:
-            return Response({"message":"New Password should not match old passwords."})
+            return Response({"message":"New Password should not match old passwords."}, status=status.HTTP_400_BAD_REQUEST)
         if new_password != confirm_password:
             return Response({"message": "Passwords do not match"}, status=status.HTTP_400_BAD_REQUEST)
         if not _password_check(new_password):
-            return Response({"message":"Password must contain atleast 8 characters that include one uppercase, one lowercase, one number, and one special character."})
+            return Response({"message":"Password must contain atleast 8 characters that include one uppercase, one lowercase, one number, and one special character."}, status=status.HTTP_400_BAD_REQUEST)
 
 
         user = request.user
@@ -596,10 +611,7 @@ class PasswordChangeAPIView(AuthenticatedAPIView):
         with transaction.atomic():
             user.set_password(new_password)
             user.is_password_set = True
-            user.token_version += 1
-            user.save(update_fields=["password", "is_password_set", "token_version", "updated_at"])
-            _blacklist_refresh_token_by_raw(_extract_cookie_token(request, refresh_token_cookie))
-            _blacklist_request_access_token(request)
+            user.save(update_fields=["password", "is_password_set", "updated_at"])
 
         response = Response({"message": "Password changed successfully"}, status=status.HTTP_200_OK)
         logger.info("password_change_success user_id=%s", user.user_id)
@@ -640,12 +652,19 @@ class ProfileAPIView(AuthenticatedAPIView):
             username = (updates["username"] or "").strip()
             if not username:
                 return Response({"message": "username cannot be blank"}, status=status.HTTP_400_BAD_REQUEST)
+            check, check_message = _username_check(username)
+            if not check:
+                return Response({"message": check_message},status=status.HTTP_400_BAD_REQUEST,)
             if User.objects.filter(username__iexact=username).exclude(user_id=user.user_id).exists():
                 return Response({"message": "Username already exists"}, status=status.HTTP_400_BAD_REQUEST)
             updates["username"] = username
 
         if "first_name" in updates and not str(updates["first_name"]).strip():
             return Response({"message": "first_name cannot be blank"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        check_first_name, check_first_name_message = _check_name(updates.get("first_name").strip())
+        if not check_first_name:
+            return Response({"message": check_first_name_message},status=status.HTTP_400_BAD_REQUEST,)
 
         if "gender" in updates:
             valid_genders = {choice[0] for choice in User.GENDER_CHOICES}
@@ -653,8 +672,19 @@ class ProfileAPIView(AuthenticatedAPIView):
                 return Response({"message": "Invalid gender"}, status=status.HTTP_400_BAD_REQUEST)
         
         if "age" in updates:
-            if not isinstance(updates.get("age"),int) or updates.get("age")<=0:
+            if updates.get("age") is None:
+                pass
+            elif not isinstance(updates.get("age"),int) or updates.get("age")<=0:
                 return Response({"message": "Age should be a positive number"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if "last_name" in updates:
+            last_name = updates.get("last_name")
+            if last_name is None:
+                pass
+            elif last_name.strip():
+                check_last_name, check_last_name_message = _check_name(last_name.strip(), "Last")
+                if not check_last_name:
+                    return Response({"message": check_last_name_message},status=status.HTTP_400_BAD_REQUEST,)
 
         for field, value in updates.items():
             setattr(user, field, value)
@@ -773,7 +803,37 @@ def _create_password_reset_otp(user):
     )
     return otp
 
+def _check_name(name, type="First"):
+    pattern = r'^[a-zA-Z]{2,100}$'
+    if len(name) < 2:
+        return False, f"{type} Name should contain atleast 2 characters"
+    if len(name) > 50:
+        return False, f"{type} Name should contain maximum 100 characters"
+    if not re.match(pattern, name):
+        return False, f"{type} Name should contain alphabets only"
+    return True, None
 
+def _age_check(age):
+    try:
+        age  = int(age)
+    except Exception as e:
+        return False, "Age should be a numeric value between 13 and 120"
+    if int(age)<13:
+        return False, "Age should be greater than 13 years to register"
+    if int(age)>120:
+        return False, "Age should not be greater than 120 years"
+    return True, None
+
+def _username_check(username):
+    pattern = r'^[a-zA-Z0-9]{4,30}$'
+    if len(username) < 4:
+        return False, "Username should contain atleast 4 characters"
+    if len(username) > 30:
+        return False, "Username should contain 30 characters maximum"
+    if not re.match(pattern, username):
+        return False, "Username should only contain alphabets and numbers"
+    return True, None
+    
 def _generate_otp():
     return f"{secrets.randbelow(1_000_000):06d}"
 
@@ -856,7 +916,6 @@ def _get_or_issue_scoped_access_token(user, scope: str, ttl_seconds: int):
         cache.set(key, token, timeout=ttl_seconds)
     except Exception as e:
         logger.warning("cache_set_failed key=%s", key, e)
-
     return token, True
 
 def _create_refresh_token(user):
@@ -955,7 +1014,7 @@ def _extract_cookie_token(request, cookie_name):
     return request.COOKIES.get(cookie_name)
 
 def _password_check(password):
-    pattern = r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_]).{8,}$'
+    pattern = r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+=\-\[\]{};:"\'\\|,.<>\/?]).{8,}$'
 
     if not re.match(pattern, password):
         # raise ValidationError(

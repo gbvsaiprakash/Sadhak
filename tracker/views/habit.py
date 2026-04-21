@@ -1,11 +1,12 @@
 from django.utils import timezone
-from rest_framework import status
+from rest_framework import request, status
 from rest_framework.response import Response
 
 from tracker.models import Habit, TaskOccurrence
 from tracker.serializers import HabitDetailSerializer, HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, generate_occurrences, mark_occurrence
 from tracker.views.mixins import TrackerAPIViewMixin
+from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
 
 
 class HabitBaseAPIView(TrackerAPIViewMixin):
@@ -26,6 +27,7 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
         return self.get_object(self.get_queryset(), id=pk)
     
     def stop_habit(self, habit, is_deleted=False):
+        ensure_not_depended_on(habit)
         habit.status = "stopped"
         habit.is_deleted = is_deleted
         habit.save(update_fields=["status", "is_deleted", "updated_at"])
@@ -34,11 +36,26 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
             is_deleted=is_deleted,
             updated_at=timezone.now(),
         )
+        soft_delete_owned_dependencies(habit)
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:
             check_goal_completion(habit.goal)
 
+class HabitDependencyCandidatesAPIView(HabitBaseAPIView):
+    def get(self, request, pk):
+        habit = self.get_habit(pk)
+        return Response(
+            {"error": "False", "data": list_dependency_candidates(habit, request.user)},
+            status=status.HTTP_200_OK,
+        )
+
+class HabitDependencyCandidatesForCreateAPIView(HabitBaseAPIView):
+    def get(self, request):
+        return Response(
+            {"error": "False", "data": list_dependency_candidates_for_create(request.user)},
+            status=status.HTTP_200_OK,
+        )
 
 class HabitListAPIView(HabitBaseAPIView):
     def get_serializer_class(self):
@@ -125,7 +142,9 @@ class HabitLogAPIView(HabitBaseAPIView):
         if occurrence is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit occurrence was not found.")
         status_value = request.data.get("status", "completed")
-        mark_occurrence(habit, occurrence, status_value, notes=request.data.get("notes"))
+        override_dependency = bool(request.data.get("override_dependency", False))
+        override_reason = request.data.get("override_reason")
+        mark_occurrence(habit, occurrence, status_value, notes=request.data.get("notes"), override_dependency=override_dependency, override_reason=override_reason)
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:

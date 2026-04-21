@@ -4,6 +4,8 @@ from django.db import models
 from tracker.constants import FREQUENCY_PERIOD_CHOICES, FREQUENCY_TYPE_CHOICES, SECTION_CHOICES, TASK_STATUS_CHOICES
 from tracker.models.base import UUIDTimeStampedModel
 
+def default_duration_config():
+        return {"value": 30, "unit": "minutes"}
 
 class Task(UUIDTimeStampedModel):
     user = models.ForeignKey(getattr(settings, "AUTH_USER_MODEL", "auth.User"), on_delete=models.CASCADE, related_name="tracker_tasks")
@@ -22,6 +24,7 @@ class Task(UUIDTimeStampedModel):
     end_date = models.DateField(blank=True, null=True)
     start_time = models.TimeField()
     end_time = models.TimeField(blank=True, null=True)
+    duration_config = models.JSONField(default=default_duration_config, blank=True)
     day_of_week = models.PositiveSmallIntegerField(blank=True, null=True)
     day_of_month = models.PositiveSmallIntegerField(blank=True, null=True)
     interval_hours = models.PositiveSmallIntegerField(blank=True, null=True)

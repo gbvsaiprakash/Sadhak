@@ -44,6 +44,7 @@ def _filter_occurrences(user, start, end, section=None, status_value=None, only_
     qs = (
         TaskOccurrence.objects.filter(
             scheduled_date__range=(start, end),
+            is_deleted=False,
         )
         .select_related("task", "habit")
         .filter(Q(task__user=user) | Q(habit__user=user))

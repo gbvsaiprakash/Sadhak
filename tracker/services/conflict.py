@@ -13,6 +13,32 @@ def _normalize_time(t):
         return None
     return t.replace(second=0, microsecond=0)
 
+def _duration_minutes_from_entity(entity):
+    cfg = getattr(entity, "duration_config", None) or {}
+    value = int(cfg.get("value", 30) or 30)
+    unit = (cfg.get("unit") or "minutes").lower()
+    return value * 60 if unit == "hours" else value
+
+
+def _end_from_duration(start_t, duration_mins):
+    dt = datetime.combine(timezone.localdate(), start_t) + timedelta(minutes=duration_mins)
+    cap = datetime.combine(timezone.localdate(), time(23, 59))
+    return min(dt, cap).time().replace(second=0, microsecond=0)
+
+
+def _iter_candidate_start_times(entity, scheduled_date):
+    """
+    Supports both return formats from _generate_times_for_date:
+    - [time, time, ...]
+    - [(start_time, end_time), ...]
+    """
+    raw = _generate_times_for_date(entity, scheduled_date)
+    for item in raw:
+        if isinstance(item, tuple):
+            yield _normalize_time(item[0])
+        else:
+            yield _normalize_time(item)
+
 
 def _overlaps(existing_start, existing_end, new_start, new_end):
     # strict overlap; boundary touch is allowed
@@ -79,14 +105,25 @@ def check_time_conflict(user, instance, scheduled_date, start_time, end_time, ex
         parent = occ.task or occ.habit
         if parent is None:
             continue
-        # duration = _entity_duration(parent)
+        # # duration = _entity_duration(parent)
+        # # occ_start = _normalize_time(occ.scheduled_time or parent.start_time)
+        # # occ_end = _add_duration(occ_start, duration)
         # occ_start = _normalize_time(occ.scheduled_time or parent.start_time)
-        # occ_end = _add_duration(occ_start, duration)
+        # occ_end = _normalize_time(occ.schedule_end_time) if getattr(occ, "schedule_end_time", None) else None
+        # if occ_end is None:
+        #     duration = _entity_duration(parent)
+        #     occ_end = _add_duration(occ_start, duration)
         occ_start = _normalize_time(occ.scheduled_time or parent.start_time)
-        occ_end = _normalize_time(occ.schedule_end_time) if getattr(occ, "schedule_end_time", None) else None
+        if occ_start is None:
+            continue
+
+        # Prefer stored occurrence end time
+        occ_end = _normalize_time(getattr(occ, "schedule_end_time", None))
+
+        # If missing, compute from parent duration_config (default 30m)
         if occ_end is None:
-            duration = _entity_duration(parent)
-            occ_end = _add_duration(occ_start, duration)
+            occ_end = _end_from_duration(occ_start, _duration_minutes_from_entity(parent))
+
 
         if _overlaps(occ_start, occ_end, start_time, end_time):
             conflict_type = "task" if occ.task_id else "habit"
@@ -138,19 +175,34 @@ def check_entity_schedule_conflicts(user, entity, from_date=None, to_date=None, 
     if end_date < start_date:
         return
 
-    duration = _entity_duration(entity)
+    # duration = _entity_duration(entity)
+    duration_mins = _duration_minutes_from_entity(entity)
 
     if entity.frequency_type == "custom" and entity.frequency_times_per_period and entity.frequency_period in {"week", "month"}:
         date_iter = _generate_custom_period_dates(entity, start_date, end_date)
     else:
         date_iter = _generate_dates(entity, start_date, end_date)
 
+    # for scheduled_date in date_iter:
+    #     # for start_t, end_t in _generate_times_for_date(entity, scheduled_date):
+    #     #     end_t = _add_duration(start_t, duration)
+    #     #     check_time_conflict(user, entity, scheduled_date, start_t, end_t, exclude_id=exclude_id)
+    #     for start_t, end_t in _generate_times_for_date(entity, scheduled_date):
+    #         if end_t is None:
+    #             end_t = _add_duration(start_t, duration)
+    #         check_time_conflict(user, entity, scheduled_date, start_t, end_t, exclude_id=exclude_id, allow_habit_habit_override=allow_habit_habit_override)
     for scheduled_date in date_iter:
-        # for start_t, end_t in _generate_times_for_date(entity, scheduled_date):
-        #     end_t = _add_duration(start_t, duration)
-        #     check_time_conflict(user, entity, scheduled_date, start_t, end_t, exclude_id=exclude_id)
-        for start_t, end_t in _generate_times_for_date(entity, scheduled_date):
-            if end_t is None:
-                end_t = _add_duration(start_t, duration)
-            check_time_conflict(user, entity, scheduled_date, start_t, end_t, exclude_id=exclude_id, allow_habit_habit_override=allow_habit_habit_override)
+        for start_t in _iter_candidate_start_times(entity, scheduled_date):
+            if start_t is None:
+                continue
+            end_t = _end_from_duration(start_t, duration_mins)
+            check_time_conflict(
+                user,
+                entity,
+                scheduled_date,
+                start_t,
+                end_t,
+                exclude_id=exclude_id,
+                allow_habit_habit_override=allow_habit_habit_override,
+            )
 
