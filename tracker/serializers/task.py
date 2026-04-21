@@ -15,6 +15,11 @@ from tracker.services import (
     regenerate_future_occurrences,
     reconcile_occurrences,
 )
+from tracker.services.dependency import get_dependencies, set_dependencies
+
+class DependencyItemSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=["task", "habit"])
+    id = serializers.UUIDField()
 
 
 class TaskOccurrenceSerializer(serializers.ModelSerializer):
@@ -70,6 +75,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     completed_occurrences = serializers.SerializerMethodField()
     missed_occurrences = serializers.SerializerMethodField()
     skipped_occurrences = serializers.SerializerMethodField()
+    dependencies = DependencyItemSerializer(many=True, write_only=True, required=False)
+    dependency_items = serializers.SerializerMethodField(read_only=True)
+    duration_value = serializers.IntegerField(write_only=True, required=False, min_value=1)
+    duration_unit = serializers.ChoiceField(write_only=True, required=False, choices=("minutes", "hours"))
+    duration = serializers.SerializerMethodField(read_only=True)
+
 
     SCHEDULE_FIELDS = {
         "frequency_type",
@@ -81,6 +92,9 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         "end_date",
         "start_time",
         "end_time",
+        "duration_value",
+        "duration_unit",
+        "duration",
         "day_of_week",
         "day_of_month",
         "interval_hours",
@@ -108,6 +122,9 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             "end_date",
             "start_time",
             "end_time",
+            "duration_value",
+            "duration_unit",
+            "duration",
             "day_of_week",
             "day_of_month",
             "interval_hours",
@@ -119,6 +136,8 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             "missed_occurrences",
             "skipped_occurrences",
             "occurrences",
+            "dependencies",
+            "dependency_items",
             "created_at",
             "updated_at",
         )
@@ -130,6 +149,28 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         if self.instance is not None:
             return getattr(self.instance, key, default)
         return default
+    
+    def get_duration(self, obj):
+        cfg = obj.duration_config or {"value": 30, "unit": "minutes"}
+        return {"value": int(cfg.get("value", 30)), "unit": cfg.get("unit", "minutes")}
+
+    def _effective_duration_config(self, attrs):
+        v = attrs.pop("duration_value", None)
+        u = attrs.pop("duration_unit", None)
+
+        if v is not None and u is None:
+            raise_tracker_error("INVALID_DURATION", "duration_unit is required when duration_value is provided.")
+        if u is not None and v is None:
+            raise_tracker_error("INVALID_DURATION", "duration_value is required when duration_unit is provided.")
+
+        if v is not None and u is not None:
+            attrs["duration_config"] = {"value": int(v), "unit": u}
+            return
+
+        if self.instance is not None and getattr(self.instance, "duration_config", None):
+            attrs["duration_config"] = self.instance.duration_config
+        else:
+            attrs["duration_config"] = {"value": 30, "unit": "minutes"}
 
     def _normalize_days(self, raw_days, frequency_type):
         if not raw_days:
@@ -273,6 +314,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         self.validate_active_parents(attrs)
         self._normalize_frequency_payload(attrs)
         self.validate_frequency(attrs, require_end_date=True)
+        self._effective_duration_config(attrs)
         self.validate_time_window(attrs)
         return attrs
 
@@ -284,31 +326,50 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         if goal and goal.status == "cancelled":
             raise_tracker_error("GOAL_CANCELLED", "Cannot assign a cancelled goal to a task.")
 
-    def _default_end_time(self, start_time):
-        dt = datetime.combine(date.today(), start_time) + timedelta(hours=1)
-        if dt.date() != date.today():
-            return datetime.combine(date.today(), datetime.max.time().replace(hour=23, minute=59, second=0, microsecond=0)).time()
-        return dt.time().replace(second=0, microsecond=0)
+    def default_duration_config():
+        return {"value": 30, "unit": "minutes"}
 
     def validate_time_window(self, attrs):
         start_time = attrs.get("start_time", getattr(self.instance, "start_time", None))
         end_time = attrs.get("end_time", getattr(self.instance, "end_time", None))
         if start_time is None:
             raise_tracker_error("START_TIME_REQUIRED", "start_time is required.")
-        if not end_time:
-            end_time = self._default_end_time(start_time)
-            attrs["end_time"] = end_time
-        if end_time < start_time:
-            # If client sent +1h and wrapped past midnight (e.g., 23:30 -> 00:30),
-            # cap to end-of-day for same-day schedule semantics.
-            attrs["end_time"] = datetime.max.time().replace(hour=23, minute=59, second=59, microsecond=0)
-            end_time = attrs["end_time"]
-        if start_time == end_time:
-            raise_tracker_error("INVALID_TIME_WINDOW", "start_time and end_time cannot be the same.")
-        if end_time < start_time:
-            raise_tracker_error("INVALID_TIME_WINDOW", "end_time must be after start_time.")
+        
+        cfg = attrs.get("duration_config") or getattr(self.instance, "duration_config", None) or {"value": 30, "unit": "minutes"}
+        try:
+            value = int(cfg.get("value", 30) or 30)
+        except (TypeError, ValueError):
+            raise_tracker_error("INVALID_DURATION", "duration value must be a positive integer.")
+        unit = str(cfg.get("unit", "minutes")).lower()
+
+        if value < 1 or unit not in {"minutes", "hours"}:
+            raise_tracker_error("INVALID_DURATION", "duration must be valid (minutes/hours) and >= 1.")
+
+        mins = value * 60 if unit == "hours" else value
+        start_dt = datetime.combine(timezone.localdate(), start_time)
+        end_dt = start_dt + timedelta(minutes=mins)
+        if end_dt.date() != start_dt.date():
+            raise_tracker_error(
+                "INVALID_DURATION",
+                "This start_time and duration crosses midnight. Please reduce duration or change start_time.",
+            )
+        if end_time is None:
+            return attrs
+        start_date = attrs.get("start_date", getattr(self.instance, "start_date", None))
+        end_date = attrs.get("end_date", getattr(self.instance, "end_date", None))
+
+        # only validate absolute schedule window if end_date exists
+        if start_date and end_date:
+            start_dt_abs = datetime.combine(start_date, start_time)
+            end_dt_abs = datetime.combine(end_date, end_time)
+            if end_dt_abs <= start_dt_abs:
+                raise_tracker_error("INVALID_TIME_WINDOW", "Task end boundary must be after task start.")
+
         return attrs
 
+    def get_dependency_items(self, obj):
+        return get_dependencies(obj)
+    
     def get_total_occurrences(self, obj):
         return occurrence_stats(obj)["total"]
 
@@ -333,9 +394,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     def create(self, validated_data):
         validated_data["user"] = self.context["request"].user
         validated_data["is_habit"] = False
+        deps = validated_data.pop("dependencies", None)
         draft = Task(**validated_data)
         check_entity_schedule_conflicts(draft.user, draft)
         task = super().create(validated_data)
+        if deps is not None:
+            set_dependencies(task, deps, self.context["request"].user)
         generate_occurrences(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
@@ -347,10 +411,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     def update(self, instance, validated_data):
         if instance.status == "cancelled":
             raise_tracker_error("CANNOT_MODIFY_CANCELLED", "Cancelled tasks cannot be modified.")
-
+        deps = validated_data.pop("dependencies", None)
         schedule_changed = any(f in validated_data for f in self.SCHEDULE_FIELDS)
         old_instance = Task.objects.get(pk=instance.pk)
         task = super().update(instance, validated_data)
+        if deps is not None:
+            set_dependencies(task, deps, self.context["request"].user)
 
         if schedule_changed:
             from_date, to_date = self._get_schedule_window(old_instance, task, validated_data)

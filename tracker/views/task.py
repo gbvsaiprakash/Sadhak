@@ -5,6 +5,7 @@ from tracker.models import Task, TaskOccurrence
 from tracker.serializers import TaskDetailSerializer, TaskListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, mark_occurrence, sync_task_status_from_occurrences
 from tracker.views.mixins import TrackerAPIViewMixin
+from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
 
 
 class TaskBaseAPIView(TrackerAPIViewMixin):
@@ -25,26 +26,44 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
         return self.get_object(self.get_queryset(), id=pk)
 
     def cancel_task(self, task):
+        ensure_not_depended_on(task)
         TaskOccurrence.objects.filter(task=task, status="pending").update(
             status="cancelled",
             updated_at=timezone.now(),
         )
         task.status = "cancelled"
         task.save(update_fields=["status", "updated_at"])
+        soft_delete_owned_dependencies(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:
             check_goal_completion(task.goal)
     
     def delete_task(self, task):
+        ensure_not_depended_on(task)
         task.is_deleted = True
         task.save(update_fields=["is_deleted", "updated_at"])
+        soft_delete_owned_dependencies(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:
             check_goal_completion(task.goal)
     
 
+class TaskDependencyCandidatesAPIView(TaskBaseAPIView):
+    def get(self, request, pk):
+        task = self.get_task(pk)
+        return Response(
+            {"error": "False", "data": list_dependency_candidates(task, request.user)},
+            status=status.HTTP_200_OK,
+        )
+
+class TaskDependencyCandidatesForCreateAPIView(TaskBaseAPIView):
+    def get(self, request):
+        return Response(
+            {"error": "False", "data": list_dependency_candidates_for_create(request.user)},
+            status=status.HTTP_200_OK,
+        )
 
 
 class TaskListAPIView(TaskBaseAPIView):
@@ -114,7 +133,9 @@ class TaskCompleteAPIView(TaskBaseAPIView):
             occurrence = TaskOccurrence.objects.filter(task=task, id=occurrence_id).first()
             if occurrence is None:
                 return self.finalize_error("TASK_NOT_FOUND", "Task occurrence was not found.")
-            mark_occurrence(task, occurrence, "completed", notes=notes)
+            override_dependency = bool(request.data.get("override_dependency", False))
+            override_reason = request.data.get("override_reason")
+            mark_occurrence(task, occurrence, "completed", notes=notes, override_dependency=override_dependency, override_reason=override_reason)
             sync_task_status_from_occurrences(task)
         else:
             task.status = "completed"
