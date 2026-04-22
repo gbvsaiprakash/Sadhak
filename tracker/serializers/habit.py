@@ -6,7 +6,7 @@ from rest_framework import serializers
 
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Habit, TaskOccurrence
-from tracker.serializers.common import TrackerValidationMixin, occurrence_stats
+from tracker.serializers.common import TrackerValidationMixin, occurrence_stats, DependencyItemSerializer
 from tracker.services import (
     check_entity_schedule_conflicts,
     check_goal_completion,
@@ -16,10 +16,6 @@ from tracker.services import (
     reconcile_occurrences,
 )
 from tracker.services.dependency import get_dependencies, set_dependencies
-
-class DependencyItemSerializer(serializers.Serializer):
-    type = serializers.ChoiceField(choices=["task", "habit"])
-    id = serializers.UUIDField()
 
 
 class HabitOccurrenceSerializer(serializers.ModelSerializer):

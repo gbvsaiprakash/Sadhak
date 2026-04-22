@@ -186,3 +186,7 @@ def occurrence_stats(instance):
         "skipped": qs.filter(status="skipped").count(),
         "next_occurrence": next_occurrence,
     }
+
+class DependencyItemSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=["task", "habit"])
+    id = serializers.UUIDField()
