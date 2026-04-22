@@ -2,7 +2,7 @@ from django.conf import settings
 from django.db import models
 
 from tracker.constants import FREQUENCY_PERIOD_CHOICES, FREQUENCY_TYPE_CHOICES, HABIT_STATUS_CHOICES, SECTION_CHOICES
-from tracker.models.base import UUIDTimeStampedModel
+from sadhak_base.models import UUIDTimeStampedModel
 
 def default_duration_config():
         return {"value": 30, "unit": "minutes"}

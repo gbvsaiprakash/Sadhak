@@ -8,7 +8,7 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework_simplejwt.tokens import AccessToken
 from django.http.multipartparser import MultiPartParser
 from django.utils.datastructures import MultiValueDictKeyError
-from user_management.models import AuditLog
+from sadhak_base.models import AuditLog
 
 from user_management.models import User
 # from utils import set_current_user
@@ -53,7 +53,7 @@ class DebugAuthenticationMiddleware:
     def __call__(self, request):
         custom_auth_token = request.headers.get("CustomAuthToken")
         log_data = {"action":request.resolver_match,"method":request.method,"path":request.path,"request_data":None,"response_data":None,"status":None}
-        if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"] and request.body:
+        if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"] and "/admin/login/" not in request.get_full_path() and request.body:
             log_data["request_data"] = remove_token_fields(json.loads(request.body))
 
         if custom_auth_token:

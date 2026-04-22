@@ -1,6 +1,6 @@
 from django.db import models
 
-from tracker.models.base import UUIDTimeStampedModel
+from sadhak_base.models import UUIDTimeStampedModel
 
 
 class TaskOccurrence(UUIDTimeStampedModel):

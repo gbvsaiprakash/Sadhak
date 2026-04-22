@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'corsheaders', # needed if frontend is on other origin
     'user_management',
     'tracker',
+    'sadhak_base',
 
 ]
 

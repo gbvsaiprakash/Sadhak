@@ -1,7 +1,7 @@
 from django.db import models
 from django.db.models import F, Q
 
-from tracker.models.base import UUIDTimeStampedModel
+from sadhak_base.models import UUIDTimeStampedModel
 
 
 class TrackerDependency(UUIDTimeStampedModel):
