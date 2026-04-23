@@ -1,6 +1,8 @@
 from django.db import models
 
 from sadhak_base.models import UUIDTimeStampedModel
+from tracker.constants import REMINDER_MODE_CHOICES, REMINDER_MODE_SET
+from tracker.models.task import default_reminder_config
 
 
 class TaskOccurrence(UUIDTimeStampedModel):
@@ -52,3 +54,34 @@ class TaskOccurrence(UUIDTimeStampedModel):
     def __str__(self):
         target = self.task or self.habit
         return f"{target} @ {self.scheduled_date}"
+
+
+class OccurrenceReminder(UUIDTimeStampedModel):
+    occurrence = models.ForeignKey(
+        "tracker.TaskOccurrence",
+        on_delete=models.CASCADE,
+        related_name="reminders",
+    )
+    offset_minutes = models.PositiveIntegerField()
+    mode = models.CharField(max_length=20, choices=REMINDER_MODE_CHOICES)
+    remind_at = models.DateTimeField(db_index=True)
+
+    event_emitted = models.BooleanField(default=False, db_index=True)
+    event_emitted_at = models.DateTimeField(blank=True, null=True)
+
+    sent = models.BooleanField(default=False, db_index=True)
+    sent_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["remind_at", "event_emitted"]),
+            models.Index(fields=["sent", "mode"]),
+            models.Index(fields=["occurrence", "remind_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["occurrence", "offset_minutes", "mode"],
+                condition=models.Q(is_deleted=False),
+                name="tracker_unique_occurrence_reminder",
+            ),
+        ]

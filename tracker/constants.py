@@ -37,6 +37,15 @@ FREQUENCY_TYPE_CHOICES = (
     ("custom", "Custom"),
 )
 
+REMINDER_MODE_CHOICES = (
+    ("in-app", "In-App"),
+    ("email", "Email"),
+    ("sms", "SMS"),
+    ("push", "Push Notification"),
+)
+
+REMINDER_MODE_SET = {c[0] for c in REMINDER_MODE_CHOICES}
+
 FREQUENCY_PERIOD_CHOICES = (
     ("day", "Day"),
     ("week", "Week"),

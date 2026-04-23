@@ -1,8 +1,9 @@
 from django.conf import settings
 from django.db import models
-
+from tracker.models.task import default_reminder_config
 from tracker.constants import FREQUENCY_PERIOD_CHOICES, FREQUENCY_TYPE_CHOICES, HABIT_STATUS_CHOICES, SECTION_CHOICES
 from sadhak_base.models import UUIDTimeStampedModel
+from django.core.exceptions import ValidationError
 
 def default_duration_config():
         return {"value": 30, "unit": "minutes"}
@@ -33,6 +34,9 @@ class Habit(UUIDTimeStampedModel):
     conflict_override = models.BooleanField(default=False)
     conflict_override_reason = models.TextField(blank=True, null=True)
     conflict_overridden_at = models.DateTimeField(blank=True, null=True)
+    reminder_enabled = models.BooleanField(default=False)
+    reminder_mode_all = models.BooleanField(blank=True, null=True)
+    reminder_offset = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ("start_date", "start_time", "created_at")
@@ -44,3 +48,51 @@ class Habit(UUIDTimeStampedModel):
 
     def __str__(self):
         return self.title
+    
+    def clean(self):
+        super().clean()
+
+        if not self.reminder_enabled:
+            return
+
+        if not isinstance(self.reminder_offset, list) or len(self.reminder_offset) == 0:
+            raise ValidationError({"reminder_offset": "Provide at least one reminder."})
+
+        seen_minutes = set()
+        modes_seen = set()
+
+        for i, item in enumerate(self.reminder_offset):
+            if not isinstance(item, dict):
+                raise ValidationError({f"reminder_offset[{i}]": "Each reminder must be an object."})
+
+            value = item.get("value")
+            unit = item.get("unit")
+            mode = item.get("mode")
+
+            if not isinstance(value, int) or value <= 0:
+                raise ValidationError({f"reminder_offset[{i}].value": "Must be a positive integer."})
+
+            if unit not in ("minutes", "hours"):
+                raise ValidationError({f"reminder_offset[{i}].unit": "Must be 'minutes' or 'hours'."})
+
+            if mode not in REMINDER_MODE_SET:
+                raise ValidationError({f"reminder_offset[{i}].mode": "Must be one of in-app, push, sms, email."})
+
+            minutes = value * 60 if unit == "hours" else value
+            if minutes in seen_minutes:
+                raise ValidationError({"reminder_offset": "Duplicate reminder times are not allowed."})
+            seen_minutes.add(minutes)
+            modes_seen.add(mode)
+
+        if self.reminder_mode_all and len(modes_seen) > 1:
+            raise ValidationError(
+                {"reminder_offset": "All reminder modes must be same when reminder_mode_all=True."}
+            )
+
+    def save(self, *args, **kwargs):
+        if self.reminder_enabled and not self.reminder_offset:
+            self.reminder_offset = default_reminder_config()
+        elif not self.reminder_enabled:
+            self.reminder_offset = []
+        self.full_clean()
+        super().save(*args, **kwargs)
