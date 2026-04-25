@@ -49,6 +49,38 @@ class Habit(UUIDTimeStampedModel):
     def __str__(self):
         return self.title
     
+    def get_normalized_reminders(self):
+        """
+        Always return:
+        [{"value": int, "unit": "minutes|hours", "mode": "in-app|push|email"}]
+        """
+        items = self.reminder_offset or []
+        if not self.reminder_enabled:
+            return []
+
+        normalized = []
+        default_mode = None
+
+        for item in items:
+            value = int(item.get("value", 0))
+            unit = item.get("unit")
+            mode = item.get("mode")
+
+            if unit not in ("minutes", "hours") or value <= 0:
+                continue
+
+            if self.reminder_mode_all:
+                if default_mode is None:
+                    default_mode = mode or "in-app"
+                mode = default_mode
+            else:
+                mode = mode or "in-app"
+
+            normalized.append({"value": value, "unit": unit, "mode": mode})
+
+        return normalized
+
+    
     def clean(self):
         super().clean()
 

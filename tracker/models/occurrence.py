@@ -85,3 +85,6 @@ class OccurrenceReminder(UUIDTimeStampedModel):
                 name="tracker_unique_occurrence_reminder",
             ),
         ]
+    
+    def __str__(self):
+        return f"{self.occurrence_id} - {self.offset_minutes}m - {self.mode}"

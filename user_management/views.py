@@ -7,7 +7,6 @@ from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.utils.decorators import method_decorator
-from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -49,7 +48,8 @@ from sadhak.app_settings import (
     SCOPE_SETUP_PASSWORD,
     refresh_token_path,
 )
-from .models import OTPVerification, User
+from .models import OTPVerification, User, NotificationPreference
+from user_management.serializers import NotificationPreferenceSerializer
 
 
 logger = logging.getLogger(__name__)
@@ -714,6 +714,23 @@ class ProfileAPIView(AuthenticatedAPIView):
     def put(self, request):
         return self.patch(request)
 
+class NotificationPreferenceAPIView(AuthenticatedAPIView):
+    """
+    GET: fetch current user's notification preference.
+    PATCH: partial update current user's notification preference.
+    """
+
+    def get(self, request):
+        pref, _ = NotificationPreference.objects.get_or_create(user=request.user)
+        serializer = NotificationPreferenceSerializer(pref)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        pref, _ = NotificationPreference.objects.get_or_create(user=request.user)
+        serializer = NotificationPreferenceSerializer(pref, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 class LogoutAPIView(AuthenticatedAPIView):
     def post(self, request):

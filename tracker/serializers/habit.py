@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
-
+from tracker.constants import REMINDER_MODE_SET
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Habit, TaskOccurrence
 from tracker.serializers.common import TrackerValidationMixin, occurrence_stats, DependencyItemSerializer
@@ -14,6 +14,7 @@ from tracker.services import (
     generate_occurrences,
     regenerate_future_occurrences,
     reconcile_occurrences,
+    sync_occurrence_reminders_for_parent,
 )
 from tracker.services.dependency import get_dependencies, set_dependencies
 
@@ -92,7 +93,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         "day_of_month",
         "interval_hours",
     }
-
+    REMINDER_FIELDS = {"reminder_enabled", "reminder_mode_all", "reminder_offset"}
     VALID_WEEKDAYS = {1,2,3,4,5,6,0} #{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
     VALID_MONTHDAYS = set(range(1, 32))
 
@@ -166,7 +167,50 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         else:
             attrs["duration_config"] = {"value": 30, "unit": "minutes"}
 
+    def normalize_reminder_payload(self, reminder_enabled, reminder_mode_all, reminder_offset):
+        if not reminder_enabled:
+            return []
 
+        items = reminder_offset or [{"value": 30, "unit": "minutes", "mode": "in-app"}]
+        if not isinstance(items, list):
+            raise serializers.ValidationError({"reminder_offset": "Must be a list."})
+
+        normalized = []
+        seen = set()
+        shared_mode = None
+
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx} must be object."})
+
+            value = item.get("value")
+            unit = item.get("unit")
+            mode = item.get("mode")
+
+            if not isinstance(value, int) or value <= 0:
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: value must be positive integer."})
+            if unit not in ("minutes", "hours"):
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: unit must be minutes or hours."})
+
+            if reminder_mode_all:
+                shared_mode = shared_mode or (mode or "in-app")
+                mode = shared_mode
+            else:
+                mode = mode or "in-app"
+
+            if mode not in REMINDER_MODE_SET:
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: invalid mode."})
+
+            mins = value * 60 if unit == "hours" else value
+            dedupe_key = (mins, mode)
+            if dedupe_key in seen:
+                raise serializers.ValidationError({"reminder_offset": "Duplicate reminder entries."})
+            seen.add(dedupe_key)
+
+            normalized.append({"value": value, "unit": unit, "mode": mode})
+
+        return normalized
+    
     def _normalize_days(self, raw_days, frequency_type):
         if not raw_days:
             return []
@@ -303,6 +347,15 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         self.validate_time_window(attrs)
         if self._effective(attrs, "frequency_type") == "once":
             raise_tracker_error("INVALID_FREQUENCY_CONFIG", "Habits must be recurring and cannot use once frequency.")
+        reminder_enabled = attrs.get("reminder_enabled", getattr(self.instance, "reminder_enabled", False))
+        reminder_mode_all = attrs.get("reminder_mode_all", getattr(self.instance, "reminder_mode_all", True))
+        reminder_offset = attrs.get("reminder_offset", getattr(self.instance, "reminder_offset", []))
+
+        attrs["reminder_offset"] = self.normalize_reminder_payload(
+            reminder_enabled=reminder_enabled,
+            reminder_mode_all=reminder_mode_all,
+            reminder_offset=reminder_offset,
+        )
         return attrs
 
     def validate_active_parents(self, attrs):
@@ -379,6 +432,12 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         from_date = min(old_instance.start_date, new_instance.start_date)
         to_date = max(old_end, new_end)
         return from_date, to_date
+    
+    def _changed(self, instance, attrs, fields):
+        for f in fields:
+            if f in attrs and attrs.get(f) != getattr(instance, f):
+                return True
+        return False
 
     @transaction.atomic
     def create(self, validated_data):
@@ -425,7 +484,8 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         override = validated_data.pop("conflict_override", False)
         reason = validated_data.pop("conflict_override_reason", None)
         deps = validated_data.pop("dependencies", None)
-        schedule_changed = any(f in validated_data for f in self.SCHEDULE_FIELDS)
+        schedule_changed = self._changed(instance, validated_data, self.SCHEDULE_FIELDS)
+        reminder_changed = self._changed(instance, validated_data, self.REMINDER_FIELDS)
         old_instance = Habit.objects.get(pk=instance.pk)
         habit = super().update(instance, validated_data)
         if deps is not None:
@@ -470,6 +530,9 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             except TypeError:
                 # regenerate_future_occurrences(habit)
                 generate_occurrences(habit, from_date=effective_from, to_date=to_date)
+        elif reminder_changed:
+            sync_occurrence_reminders_for_parent(habit)
+        
         habit.conflict_override = bool(override)
         habit.conflict_override_reason = reason if override else None
         habit.conflict_overridden_at = timezone.now() if override else None

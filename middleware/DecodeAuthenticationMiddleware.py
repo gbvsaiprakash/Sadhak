@@ -54,7 +54,19 @@ class DebugAuthenticationMiddleware:
         custom_auth_token = request.headers.get("CustomAuthToken")
         log_data = {"action":request.resolver_match,"method":request.method,"path":request.path,"request_data":None,"response_data":None,"status":None}
         if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"] and "/admin/login/" not in request.get_full_path() and request.body:
-            log_data["request_data"] = remove_token_fields(json.loads(request.body))
+            content_type = (request.content_type or "").split(";")[0].strip().lower()
+            if content_type == "application/json":
+                try:
+                    body_data = json.loads(request.body.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    body_data = None
+            else:
+                # admin/forms: application/x-www-form-urlencoded or multipart/form-data
+                try:
+                    body_data = request.POST.dict() if request.method in ("POST", "PUT", "PATCH") else None
+                except Exception:
+                    body_data = None
+            log_data["request_data"] = remove_token_fields(body_data) if body_data else None
 
         if custom_auth_token:
             request.META["HTTP_AUTHORIZATION"] = f"Bearer {custom_auth_token}"

@@ -154,3 +154,9 @@ class User(AbstractBaseUser, PermissionsMixin):
                 condition=models.Q(is_deleted=False),
                 name="unique_active_username")]
 
+class NotificationPreference(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="notification_pref")
+    notifications_enabled = models.BooleanField(default=True)
+    in_app_enabled = models.BooleanField(default=True)
+    push_enabled = models.BooleanField(default=True)
+    email_enabled = models.BooleanField(default=True)

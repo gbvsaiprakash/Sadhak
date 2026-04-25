@@ -5,7 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from tracker.constants import RESOLVED_OCCURRENCE_STATUSES
-from tracker.models import TaskOccurrence
+from tracker.models import TaskOccurrence, OccurrenceReminder
 from tracker.services.dependency import ensure_dependencies_completed_for_occurrence
 
 def _occurrence_model_fields(entity):
@@ -46,6 +46,61 @@ def _add_duration(start_t, duration):
     capped = min(dt, datetime.combine(timezone.localdate(), time(23, 59)))
     return capped.time().replace(second=0, microsecond=0)
 
+def _occurrence_datetime(occ):
+    base_time = occ.scheduled_time or time(0, 0)
+    naive = datetime.combine(occ.scheduled_date, base_time)
+    return timezone.make_aware(naive, timezone.get_current_timezone())
+
+def _parent_reminders(parent):
+    if not parent.reminder_enabled:
+        return []
+    normalized = parent.get_normalized_reminders()
+    out = []
+    for item in normalized:
+        mins = item["value"] * 60 if item["unit"] == "hours" else item["value"]
+        out.append({"offset_minutes": mins, "mode": item["mode"]})
+    return out
+
+def rebuild_reminders_for_occurrences(occurrences):
+    """
+    Rebuild reminder rows only for the touched occurrences.
+    Safe for both first-create and reschedule paths.
+    """
+    
+    occurrences = list(occurrences)
+    if not occurrences:
+        return
+
+    OccurrenceReminder.objects.filter(
+        occurrence__in=occurrences,
+        sent=False,
+        is_deleted=False,
+    ).update(is_deleted=True)
+
+    rows = []
+    for occ in occurrences:
+        if occ.status != "pending" or occ.is_deleted:
+            continue
+
+        parent = occ.task or occ.habit
+        rules = _parent_reminders(parent)
+
+        if not rules:
+            continue
+
+        occ_dt = _occurrence_datetime(occ)
+        for rule in rules:
+            rows.append(
+                OccurrenceReminder(
+                    occurrence=occ,
+                    offset_minutes=rule["offset_minutes"],
+                    mode=rule["mode"],
+                    remind_at=occ_dt - timedelta(minutes=rule["offset_minutes"]),
+                )
+            )
+
+    if rows:
+        OccurrenceReminder.objects.bulk_create(rows, ignore_conflicts=True)
 
 def _monthly_days_for(entity, year, month):
     last_day = monthrange(year, month)[1]
@@ -458,6 +513,7 @@ def _generate_custom_period_dates(entity, start_date, end_date):
 #             )
 #     TaskOccurrence.objects.bulk_create(payloads, ignore_conflicts=True)
 #     return payloads
+
 def generate_occurrences(entity, from_date=None, to_date=None):
     start_date = max(entity.start_date, from_date or entity.start_date)
     if entity.frequency_type == "once":
@@ -479,13 +535,12 @@ def generate_occurrences(entity, from_date=None, to_date=None):
 
     payloads = []
     duration_mins = _duration_minutes(entity)
-
     if entity.frequency_type == "custom" and entity.frequency_times_per_period and entity.frequency_period in {"week", "month"}:
         date_iter = _generate_custom_period_dates(entity, start_date, end_date)
     else:
         date_iter = _generate_dates(entity, start_date, end_date)
-
-    for scheduled_date in date_iter:
+    dates_list = list(date_iter)
+    for scheduled_date in dates_list:
         for scheduled_time in _generate_times_for_date(entity, scheduled_date):
             occ_end = _compute_occurrence_end_time(scheduled_time, duration_mins)
             slot_start_dt = datetime.combine(scheduled_date, scheduled_time)
@@ -502,6 +557,14 @@ def generate_occurrences(entity, from_date=None, to_date=None):
             )
 
     TaskOccurrence.objects.bulk_create(payloads, ignore_conflicts=True)
+    
+    created_qs = TaskOccurrence.objects.filter(
+        is_deleted=False,
+        scheduled_date__in=dates_list,
+        **_occurrence_model_fields(entity),
+    ).exclude(status__in=["completed", "skipped", "missed"])
+
+    rebuild_reminders_for_occurrences(created_qs)
     return payloads
 
 
@@ -609,4 +672,41 @@ def mark_occurrence(entity, occurrence, status_value, notes=None, override_depen
     occurrence.notes = notes or occurrence.notes
     occurrence.completed_at = timezone.now() if status_value == "completed" else None
     occurrence.save(update_fields=["status", "notes", "completed_at", "updated_at"])
+    OccurrenceReminder.objects.filter(
+        occurrence=occurrence,
+        sent=False,
+        is_deleted=False,
+    ).update(is_deleted=True)
     return occurrence
+
+
+@transaction.atomic
+def sync_occurrence_reminders_for_parent(parent):
+    is_task = parent.__class__.__name__.lower() == "task"
+    occ_qs = TaskOccurrence.objects.filter(
+        task=parent if is_task else None,
+        habit=None if is_task else parent,
+        status="pending",
+        is_deleted=False,
+    )
+
+    rules = _parent_reminders(parent)
+    OccurrenceReminder.objects.filter(occurrence__in=occ_qs, sent=False, is_deleted=False).update(is_deleted=True)
+
+    if not rules:
+        return
+
+    new_rows = []
+    for occ in occ_qs:
+        occ_dt = _occurrence_datetime(occ)
+        for rule in rules:
+            new_rows.append(
+                OccurrenceReminder(
+                    occurrence=occ,
+                    offset_minutes=rule["offset_minutes"],
+                    mode=rule["mode"],
+                    remind_at=occ_dt - timedelta(minutes=rule["offset_minutes"]),
+                )
+            )
+
+    OccurrenceReminder.objects.bulk_create(new_rows, ignore_conflicts=True)
