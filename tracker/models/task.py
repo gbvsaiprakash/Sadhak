@@ -50,47 +50,55 @@ class Task(UUIDTimeStampedModel):
     
     def get_normalized_reminders(self):
         """
-        Always return:
-        [{"value": int, "unit": "minutes|hours", "mode": "in-app|push|email"}]
+        Return:
+        [{"value": int, "unit": "minutes|hours", "modes": ["in-app","push","email"]}]
         """
         items = self.reminder_offset or []
         if not self.reminder_enabled:
             return []
 
         normalized = []
-        default_mode = None
+        default_modes = None
 
         for item in items:
-            value = int(item.get("value", 0))
+            value = int(item.get("value", 0) or 0)
             unit = item.get("unit")
-            mode = item.get("mode")
+            modes = item.get("modes")
+
+            # backward compatibility: accept old single mode
+            if not modes and item.get("mode"):
+                modes = [item.get("mode")]
 
             if unit not in ("minutes", "hours") or value <= 0:
                 continue
 
             if self.reminder_mode_all:
-                if default_mode is None:
-                    default_mode = mode or "in-app"
-                mode = default_mode
+                if default_modes is None:
+                    default_modes = modes or ["in-app"]
+                modes = default_modes
             else:
-                mode = mode or "in-app"
+                modes = modes or ["in-app"]
 
-            normalized.append({"value": value, "unit": unit, "mode": mode})
+            modes = [m for m in modes if m in REMINDER_MODE_SET]
+            modes = sorted(set(modes))
+            if not modes:
+                continue
+
+            normalized.append({"value": value, "unit": unit, "modes": modes})
 
         return normalized
 
-    
     def clean(self):
         super().clean()
 
         if not self.reminder_enabled:
             return
 
-        if not isinstance(self.reminder_offset, list) or len(self.reminder_offset) == 0:
+        if not isinstance(self.reminder_offset, list) or not self.reminder_offset:
             raise ValidationError({"reminder_offset": "Provide at least one reminder."})
 
-        seen_minutes = set()
-        modes_seen = set()
+        seen_pairs = set()  # (minutes, mode)
+        all_modes_seen = set()
 
         for i, item in enumerate(self.reminder_offset):
             if not isinstance(item, dict):
@@ -98,27 +106,37 @@ class Task(UUIDTimeStampedModel):
 
             value = item.get("value")
             unit = item.get("unit")
-            mode = item.get("mode")
+            modes = item.get("modes")
+
+            # backward compatibility
+            if not modes and item.get("mode"):
+                modes = [item.get("mode")]
 
             if not isinstance(value, int) or value <= 0:
                 raise ValidationError({f"reminder_offset[{i}].value": "Must be a positive integer."})
-
             if unit not in ("minutes", "hours"):
                 raise ValidationError({f"reminder_offset[{i}].unit": "Must be 'minutes' or 'hours'."})
+            if not isinstance(modes, list) or not modes:
+                raise ValidationError({f"reminder_offset[{i}].modes": "At least one mode is required."})
 
-            if mode not in REMINDER_MODE_SET:
-                raise ValidationError({f"reminder_offset[{i}].mode": "Must be one of in-app, push, sms, email."})
+            clean_modes = []
+            for m in modes:
+                if m not in REMINDER_MODE_SET:
+                    raise ValidationError({f"reminder_offset[{i}].modes": "Invalid mode present."})
+                clean_modes.append(m)
 
+            clean_modes = sorted(set(clean_modes))
             minutes = value * 60 if unit == "hours" else value
-            if minutes in seen_minutes:
-                raise ValidationError({"reminder_offset": "Duplicate reminder times are not allowed."})
-            seen_minutes.add(minutes)
-            modes_seen.add(mode)
 
-        if self.reminder_mode_all and len(modes_seen) > 1:
-            raise ValidationError(
-                {"reminder_offset": "All reminder modes must be same when reminder_mode_all=True."}
-            )
+            for m in clean_modes:
+                key = (minutes, m)
+                if key in seen_pairs:
+                    raise ValidationError({"reminder_offset": "Duplicate reminder (time + mode) not allowed."})
+                seen_pairs.add(key)
+            all_modes_seen.add(tuple(clean_modes))
+
+        if self.reminder_mode_all and len(all_modes_seen) > 1:
+            raise ValidationError({"reminder_offset": "All reminders must use same mode set when reminder_mode_all=True."})
 
     def save(self, *args, **kwargs):
         if self.reminder_enabled and not self.reminder_offset:

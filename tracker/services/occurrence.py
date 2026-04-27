@@ -1,9 +1,9 @@
 from calendar import monthrange
 from datetime import datetime, time, timedelta
-
+from sadhak.app_settings import POST_DUE_GRACE_MIN
 from django.db import transaction
 from django.utils import timezone
-
+from sadhak_base.services import emit_event
 from tracker.constants import RESOLVED_OCCURRENCE_STATUSES
 from tracker.models import TaskOccurrence, OccurrenceReminder
 from tracker.services.dependency import ensure_dependencies_completed_for_occurrence
@@ -58,7 +58,8 @@ def _parent_reminders(parent):
     out = []
     for item in normalized:
         mins = item["value"] * 60 if item["unit"] == "hours" else item["value"]
-        out.append({"offset_minutes": mins, "mode": item["mode"]})
+        for mode in item.get("modes", []):
+            out.append({"offset_minutes": mins, "mode": mode})
     return out
 
 def rebuild_reminders_for_occurrences(occurrences):
@@ -78,6 +79,7 @@ def rebuild_reminders_for_occurrences(occurrences):
     ).update(is_deleted=True)
 
     rows = []
+    now = timezone.now()
     for occ in occurrences:
         if occ.status != "pending" or occ.is_deleted:
             continue
@@ -90,12 +92,15 @@ def rebuild_reminders_for_occurrences(occurrences):
 
         occ_dt = _occurrence_datetime(occ)
         for rule in rules:
+            remind_at = occ_dt - timedelta(minutes=rule["offset_minutes"])
+            if remind_at < now:
+                continue
             rows.append(
                 OccurrenceReminder(
                     occurrence=occ,
                     offset_minutes=rule["offset_minutes"],
                     mode=rule["mode"],
-                    remind_at=occ_dt - timedelta(minutes=rule["offset_minutes"]),
+                    remind_at=remind_at,
                 )
             )
 
@@ -692,21 +697,91 @@ def sync_occurrence_reminders_for_parent(parent):
 
     rules = _parent_reminders(parent)
     OccurrenceReminder.objects.filter(occurrence__in=occ_qs, sent=False, is_deleted=False).update(is_deleted=True)
-
     if not rules:
         return
 
     new_rows = []
+    now = timezone.now()
     for occ in occ_qs:
         occ_dt = _occurrence_datetime(occ)
         for rule in rules:
+            remind_at = occ_dt - timedelta(minutes=rule["offset_minutes"])
+            if remind_at < now:
+                continue
             new_rows.append(
                 OccurrenceReminder(
                     occurrence=occ,
                     offset_minutes=rule["offset_minutes"],
                     mode=rule["mode"],
-                    remind_at=occ_dt - timedelta(minutes=rule["offset_minutes"]),
+                    remind_at=remind_at,
                 )
             )
 
     OccurrenceReminder.objects.bulk_create(new_rows, ignore_conflicts=True)
+
+def _occurrence_due_dt(occ):
+    t = occ.scheduled_time or time(0, 0)
+    return timezone.make_aware(datetime.combine(occ.scheduled_date, t), timezone.get_current_timezone())
+
+def emit_due_reminder_events(now=None, batch_size=500):
+    now = now or timezone.now()
+    due = (
+        OccurrenceReminder.objects
+        .select_related("occurrence", "occurrence__task", "occurrence__habit")
+        .filter(
+            remind_at__lte=now,
+            event_emitted=False,
+            sent=False,
+            is_deleted=False,
+            occurrence__status="pending",
+            occurrence__is_deleted=False,
+        )
+        .order_by("occurrence_id", "mode", "-remind_at")[:batch_size]
+    )
+
+    seen_occurrence = set()
+    updated_ids = []
+    print(f"Emitting events for {len(due)} due reminders")
+    for r in due:
+        key = (r.occurrence_id, r.mode)
+        if key in seen_occurrence:
+            # older due reminder for same occurrence -> suppress:
+            r.event_emitted = True
+            r.event_emitted_at = now
+            r.is_deleted = True  # soft-skip as superseded
+            r.save(update_fields=["event_emitted", "event_emitted_at", "is_deleted", "updated_at"])
+            continue
+
+        seen_occurrence.add(key)
+        due_dt = _occurrence_due_dt(r.occurrence)
+        if now > due_dt + timedelta(minutes=POST_DUE_GRACE_MIN):
+            # too stale
+            r.event_emitted = True
+            r.event_emitted_at = now
+            r.is_deleted = True
+            r.save(update_fields=["event_emitted", "event_emitted_at", "is_deleted", "updated_at"])
+            continue
+
+        parent = r.occurrence.task or r.occurrence.habit
+        event_type = "task.reminder_due" if r.occurrence.task_id else "habit.reminder_due"
+
+        emit_event(
+            event_type=event_type,
+            actor=getattr(parent, "user", None),
+            object_type="TaskOccurrence",
+            object_id=str(r.occurrence_id),
+            payload={
+                "occurrence_id": str(r.occurrence_id),
+                "reminder_id": str(r.id),
+                "mode": r.mode,
+                "remind_at": timezone.localtime(r.remind_at).isoformat(),
+            },
+        )
+        updated_ids.append(r.id)
+
+    if updated_ids:
+        OccurrenceReminder.objects.filter(id__in=updated_ids).update(
+            event_emitted=True, event_emitted_at=now
+        )
+
+    return len(updated_ids)

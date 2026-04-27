@@ -48,3 +48,14 @@ class AuditLog(models.Model):
     status_code = models.IntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
 
+class UserNotification(UUIDTimeStampedModel):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="in_app_notifications")
+    title = models.CharField(max_length=255)
+    message = models.TextField(max_length=1000)
+    payload = models.JSONField(default=dict, blank=True)
+    is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=["user", "is_read", "created_at"])]

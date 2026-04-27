@@ -176,13 +176,13 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         if not reminder_enabled:
             return []
 
-        items = reminder_offset or [{"value": 30, "unit": "minutes", "mode": "in-app"}]
+        items = reminder_offset or [{"value": 30, "unit": "minutes", "modes": ["in-app"]}]
         if not isinstance(items, list):
             raise serializers.ValidationError({"reminder_offset": "Must be a list."})
 
         normalized = []
         seen = set()
-        shared_mode = None
+        shared_modes = None
 
         for idx, item in enumerate(items):
             if not isinstance(item, dict):
@@ -190,29 +190,36 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
 
             value = item.get("value")
             unit = item.get("unit")
-            mode = item.get("mode")
+            modes = item.get("modes")
+
+            # backward compatibility: old payload with single mode
+            if not modes and item.get("mode"):
+                modes = [item.get("mode")]
 
             if not isinstance(value, int) or value <= 0:
                 raise serializers.ValidationError({"reminder_offset": f"Item {idx}: value must be positive integer."})
             if unit not in ("minutes", "hours"):
                 raise serializers.ValidationError({"reminder_offset": f"Item {idx}: unit must be minutes or hours."})
+            if not isinstance(modes, list) or not modes:
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: modes must be non-empty list."})
+
+            # validate + normalize modes
+            clean_modes = sorted(set(modes))
+            if any(m not in REMINDER_MODE_SET for m in clean_modes):
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: invalid mode in modes."})
 
             if reminder_mode_all:
-                shared_mode = shared_mode or (mode or "in-app")
-                mode = shared_mode
-            else:
-                mode = mode or "in-app"
-
-            if mode not in REMINDER_MODE_SET:
-                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: invalid mode."})
+                shared_modes = shared_modes or clean_modes
+                clean_modes = shared_modes
 
             mins = value * 60 if unit == "hours" else value
-            dedupe_key = (mins, mode)
-            if dedupe_key in seen:
-                raise serializers.ValidationError({"reminder_offset": "Duplicate reminder entries."})
-            seen.add(dedupe_key)
+            for m in clean_modes:
+                dedupe_key = (mins, m)
+                if dedupe_key in seen:
+                    raise serializers.ValidationError({"reminder_offset": "Duplicate reminder entries (time + mode)."})
+                seen.add(dedupe_key)
 
-            normalized.append({"value": value, "unit": unit, "mode": mode})
+            normalized.append({"value": value, "unit": unit, "modes": clean_modes})
 
         return normalized
 
@@ -351,6 +358,19 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
                 and o["scheduled_date"] >= start
                 and (end is None or o["scheduled_date"] <= end)
             ]
+        
+        normalized = []
+        for item in (data.get("reminder_offset") or []):
+            # backward compatibility for old stored records
+            if "modes" not in item:
+                if item.get("mode"):
+                    item["modes"] = [item["mode"]]
+                else:
+                    item["modes"] = ["in-app"]
+            item.pop("mode", None)  # enforce new API contract
+            normalized.append(item)
+
+        data["reminder_offset"] = normalized
         return data
 
     def validate(self, attrs):

@@ -22,5 +22,5 @@ def emit_event(event_type: str, actor=None, object_type="", object_id="", payloa
         payload=payload or {},
     )
 
-# def write_audit(**kwargs):
-#     return AuditLog.objects.create(**kwargs)
+def write_audit(**kwargs):
+    return AuditLog.objects.create(**kwargs)
