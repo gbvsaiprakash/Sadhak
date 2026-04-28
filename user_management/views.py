@@ -48,8 +48,8 @@ from sadhak.app_settings import (
     SCOPE_SETUP_PASSWORD,
     refresh_token_path,
 )
-from .models import OTPVerification, User, NotificationPreference
-from user_management.serializers import NotificationPreferenceSerializer
+from .models import OTPVerification, User, NotificationPreference, UserDeviceToken
+from user_management.serializers import NotificationPreferenceSerializer, UserDeviceTokenSerializer
 
 
 logger = logging.getLogger(__name__)
@@ -1065,3 +1065,25 @@ def _set_cookie(response, key, token, max_age,path):
 def _clear_auth_cookies(response):
     response.delete_cookie(access_token_cookie, path="/")
     response.delete_cookie(refresh_token_cookie, path="/")
+
+class PushTokenAPIView(AuthenticatedAPIView):
+    def post(self, request):
+        s = UserDeviceTokenSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+
+        token = s.validated_data["token"]
+        platform = s.validated_data["platform"]
+
+        obj, _ = UserDeviceToken.objects.update_or_create(
+            token=token,
+            defaults={"user": request.user, "platform": platform, "is_active": True},
+        )
+        return Response({"id": str(obj.id), "detail": "Token registered"}, status=status.HTTP_200_OK)
+
+    def delete(self, request):
+        token = request.data.get("token")
+        if not token:
+            return Response({"detail": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        UserDeviceToken.objects.filter(user=request.user, token=token).update(is_active=False)
+        return Response({"detail": "Token deactivated"}, status=status.HTTP_200_OK)

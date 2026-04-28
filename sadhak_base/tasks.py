@@ -98,11 +98,11 @@ def process_domain_event(self, event_id: str):
         send_notification(
             user=user,
             mode=reminder.mode,
-            title=getattr(parent, "title", "Reminder") if event.event_type.__contains__("reminder_due") else "Notification",
-            task_type="habit" if getattr(parent, "is_habit", False) else "task" if parent else "item",
-            body=f"Reminder for {getattr(parent, 'title', 'your item')}" if event.event_type.__contains__("reminder_due") else "",
+            title=getattr(parent, "title", "Reminder") if "reminder_due" in event.event_type else "Notification",
+            task_type=("habit" if getattr(parent, "is_habit", False) else "task") if parent else "item",
+            body=(f"Reminder for {getattr(parent, 'title', 'your item')}" if "reminder_due" in event.event_type else ""),
             data={
-                f"{parent.__class__.__name__.lower()}_id": str(getattr(parent, "id", "")),
+                f"{parent.__class__.__name__.lower()}_id" if parent else "item_id": str(getattr(parent, "id", "")),
                 "occurrence_id": str(occurrence.id),
                 "reminder_id": str(reminder.id),
                 "event_type": event.event_type,

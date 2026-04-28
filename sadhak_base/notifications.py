@@ -4,6 +4,9 @@ from .templates import task_reminder_template_html
 from dataclasses import dataclass
 from typing import Any
 from sadhak_base.models import UserNotification
+from firebase_admin import messaging
+from sadhak_base.firebase import init_firebase
+from user_management.models import UserDeviceToken
 
 @dataclass
 class NotificationResult:
@@ -81,13 +84,54 @@ def send_notification(user, mode: str, title: str, task_type: str, body: str, da
     Raise exception on transient failures so Celery retries.
     """
     if mode == "in-app":
-        response = _send_in_app_notification(user, title, task_type, body, data if data else None)
-        return response
+        return _send_in_app_notification(user, title, task_type, body, data if data else None)
 
     if mode == "push":
-        # TODO: call push provider
-        return
+        return _send_push(user, title, body, data if data else None)
+    
     if mode == "email":
         return _send_email(user, title, task_type, body, data if data else None)
 
     raise ValueError(f"Unsupported notification mode: {mode}")
+
+def _send_push(user, title: str, body: str, data: dict | None = None):
+    tokens = list(
+        UserDeviceToken.objects.filter(user=user, is_active=True)
+        .exclude(token__isnull=True)
+        .exclude(token__exact="")
+        .values_list("token", flat=True)
+    )
+
+    if not tokens:
+        return {"status": "skipped", "reason": "no_active_tokens"}
+
+    init_firebase()
+
+    msg = messaging.MulticastMessage(
+        notification=messaging.Notification(title=title, body=body),
+        data={k: str(v) for k, v in (data or {}).items()},
+        tokens=tokens,
+    )
+
+    try:
+        resp = messaging.send_each_for_multicast(msg)
+    except Exception as exc:
+        raise NotificationRetryableError(f"FCM send failed: {exc}") from exc
+
+    # deactivate invalid tokens
+    invalid_tokens = []
+    for i, r in enumerate(resp.responses):
+        if r.success:
+            continue
+        err = str(getattr(r, "exception", "")).lower()
+        if "registration-token-not-registered" in err or "invalid-argument" in err:
+            invalid_tokens.append(tokens[i])
+
+    if invalid_tokens:
+        UserDeviceToken.objects.filter(token__in=invalid_tokens).update(is_active=False)
+
+    return {
+        "status": "sent",
+        "success_count": resp.success_count,
+        "failure_count": resp.failure_count,
+    }

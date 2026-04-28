@@ -17,6 +17,7 @@ from .views import (
     DeleteAccountAPIView,
     CheckUsernameAPIView,
     NotificationPreferenceAPIView,
+    PushTokenAPIView,
 )
 
 
@@ -37,5 +38,6 @@ urlpatterns = [
     path("delete-account/", DeleteOTPRequestAPIView.as_view(), name="account_deletion_request_initiate"),
     path("delete-account-confirm/", DeleteAccountAPIView.as_view(), name="account_deletion_request_confirm"),
     path("notification-preferences/", NotificationPreferenceAPIView.as_view(), name="notification_preferences"),
+    path("push-token/", PushTokenAPIView.as_view(), name="push-token"),
 
 ]

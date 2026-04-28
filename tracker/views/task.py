@@ -28,12 +28,13 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
 
     def cancel_task(self, task):
         ensure_not_depended_on(task)
+        task.status = "cancelled"
+        task.save(update_fields=["status", "updated_at"])
         TaskOccurrence.objects.filter(task=task, status="pending").update(
             status="cancelled",
             updated_at=timezone.now(),
         )
-        task.status = "cancelled"
-        task.save(update_fields=["status", "updated_at"])
+        OccurrenceReminder.objects.filter(occurrence__task=task, is_deleted=False).update(is_deleted=True)
         soft_delete_owned_dependencies(task)
         if task.milestone:
             check_milestone_completion(task.milestone)

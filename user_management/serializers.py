@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from user_management.models import NotificationPreference
+from user_management.models import NotificationPreference, UserDeviceToken
 
 
 class NotificationPreferenceSerializer(serializers.ModelSerializer):
@@ -11,3 +11,8 @@ class NotificationPreferenceSerializer(serializers.ModelSerializer):
             "push_enabled",
             "email_enabled",
         )
+
+class UserDeviceTokenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserDeviceToken
+        fields = ("token", "platform")
