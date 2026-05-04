@@ -10,11 +10,13 @@ from sadhak_base.serializers import UserNotificationSerializer
 from tracker.views.mixins import TrackerAPIViewMixin  # or your AuthenticatedAPIView base
 
 class NotificationListAPIView(TrackerAPIViewMixin):
+    serializer_class = UserNotificationSerializer
     def get(self, request):
         qs = UserNotification.objects.filter(user=request.user, is_deleted=False)
         return Response(UserNotificationSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 class NotificationReadAPIView(TrackerAPIViewMixin):
+    serializer_class = UserNotificationSerializer
     def patch(self, request, notification_id):
         obj = UserNotification.objects.get(id=notification_id, user=request.user, is_deleted=False)
         if not obj.is_read:
@@ -24,6 +26,7 @@ class NotificationReadAPIView(TrackerAPIViewMixin):
         return Response({"detail": "Marked as read"}, status=status.HTTP_200_OK)
 
 class NotificationReadAllAPIView(TrackerAPIViewMixin):
+    serializer_class = UserNotificationSerializer
     def patch(self, request):
         now = timezone.now()
         UserNotification.objects.filter(user=request.user, is_read=False, is_deleted=False).update(

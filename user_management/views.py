@@ -109,11 +109,11 @@ class RegistrationAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         check_first_name, check_first_name_message = _check_name(first_name)
-        check_last_name, check_last_name_message = _check_name(last_name, "Last")
+        # check_last_name, check_last_name_message = _check_name(last_name, "Last")
         if not check_first_name:
             return Response({"message": check_first_name_message},status=status.HTTP_400_BAD_REQUEST,)
-        if not check_last_name:
-            return Response({"message": check_last_name_message},status=status.HTTP_400_BAD_REQUEST,)
+        # if not check_last_name:
+        #     return Response({"message": check_last_name_message},status=status.HTTP_400_BAD_REQUEST,)
         
         check, check_message = _username_check(username)
         if not check:
@@ -137,11 +137,11 @@ class RegistrationAPIView(APIView):
                     {
                         "message": "Email already verified. Complete password setup.",
                         "next_step": "setup_password",
-                        "access_token": access_token,
+                        # "access_token": access_token,
                     },
                     status=status.HTTP_200_OK,
                 )
-                # _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
+                _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
                 return response
             # if all set return email already exists
             return Response({"message": "Email already registered. Please login or reset your password."}, status=status.HTTP_400_BAD_REQUEST)
@@ -225,12 +225,12 @@ class RegistrationAPIView(APIView):
         response = Response(
             {
                 "message": "Registration successful. Verify email using OTP.",
-                "access_token":access_token,
+                # "access_token":access_token,
                 # "user_id": str(user.user_id),
             },
             status=status.HTTP_201_CREATED,
         )
-        # _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
+        _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=ar_expiry)
         return response
 
 
@@ -277,9 +277,9 @@ class EmailVerificationAPIView(AuthenticatedAPIView):
             _blacklist_request_access_token(request)
             setup_token, _ = _get_or_issue_scoped_access_token(user, SCOPE_SETUP_PASSWORD, setup_expiry)
 
-        response = Response({"message": "Email verified successfully","access_token":setup_token}, status=status.HTTP_200_OK)
+        response = Response({"message": "Email verified successfully"}, status=status.HTTP_200_OK)
         logger.info("email_verification_success user_id=%s", user.user_id)
-        # _set_auth_cookies(response=response,access_token=setup_token,access_token_expiry=setup_expiry,)
+        _set_auth_cookies(response=response,access_token=setup_token,access_token_expiry=setup_expiry,)
         return response
 
 
@@ -312,8 +312,8 @@ class SetupPasswordAPIView(AuthenticatedAPIView):
             _blacklist_request_access_token(request)
 
         access_token, refresh_token = _issue_token_pair(user)
-        response = Response({"message": "Password setup successful", "access_token": access_token}, status=status.HTTP_200_OK)
-        _set_auth_cookies(response, access_token=None, refresh_token=refresh_token)
+        response = Response({"message": "Password setup successful"}, status=status.HTTP_200_OK)
+        _set_auth_cookies(response, access_token=access_token, refresh_token=refresh_token)
         return response
 
 
@@ -407,11 +407,12 @@ class LoginAPIView(APIView):
                     "email": user.email,
                     "roles": user.get_roles(),
                 },
-                "access_token":access_token,
+                # "access_token":access_token,
             },
             status=status.HTTP_200_OK,
         )
-        _set_auth_cookies(response, access_token=None, refresh_token=refresh_token)
+        _set_auth_cookies(response, access_token=access_token, refresh_token=refresh_token)
+        get_token(request)
         logger.info("login_success user_id=%s", user.user_id)
         return response
 
@@ -440,11 +441,11 @@ class ForgotPasswordAPIView(APIView):
             return Response({"message":"Unable to send email. please try again later."},status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         access_token,_ = _get_or_issue_scoped_access_token(user, scope=SCOPE_PASSWORD_RESET,ttl_seconds=fp_expiry)
         response = Response(
-            {"message": f"If the {username} exists, an OTP has been sent to registered Email Address", "access_token":access_token},
+            {"message": f"If the {username} exists, an OTP has been sent to registered Email Address"},
             status=status.HTTP_200_OK,
         )
         get_token(request)
-        # _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=fp_expiry)
+        _set_auth_cookies(response=response, access_token=access_token, access_token_expiry=fp_expiry)
         logger.info("forgot_password_otp_issued user_id=%s", user.user_id)
         return response
 
@@ -677,14 +678,14 @@ class ProfileAPIView(AuthenticatedAPIView):
             elif not isinstance(updates.get("age"),int) or updates.get("age")<=0:
                 return Response({"message": "Age should be a positive number"}, status=status.HTTP_400_BAD_REQUEST)
         
-        if "last_name" in updates:
-            last_name = updates.get("last_name")
-            if last_name is None:
-                pass
-            elif last_name.strip():
-                check_last_name, check_last_name_message = _check_name(last_name.strip(), "Last")
-                if not check_last_name:
-                    return Response({"message": check_last_name_message},status=status.HTTP_400_BAD_REQUEST,)
+        # if "last_name" in updates:
+        #     last_name = updates.get("last_name")
+        #     if last_name is None:
+        #         pass
+        #     elif last_name.strip():
+        #         check_last_name, check_last_name_message = _check_name(last_name.strip(), "Last")
+        #         if not check_last_name:
+        #             return Response({"message": check_last_name_message},status=status.HTTP_400_BAD_REQUEST,)
 
         for field, value in updates.items():
             setattr(user, field, value)
@@ -782,8 +783,9 @@ class RefreshAccessTokenAPIView(APIView):
         access_token,_ = _get_or_issue_scoped_access_token(user, scope=SCOPE_FULL_AUTH,ttl_seconds=access_token_seconds)
         refresh_token = _rotate_refresh_token(refresh_raw, refresh_token, user)
 
-        response = Response({"message": "Access token refreshed","access_token":access_token}, status=status.HTTP_200_OK)
-        _set_auth_cookies(response, access_token=None, refresh_token=refresh_token)
+        response = Response({"message": "Access token refreshed"}, status=status.HTTP_200_OK)
+        _set_auth_cookies(response, access_token=access_token, refresh_token=refresh_token)
+        get_token(request)
         logger.info("refresh_access_success user_id=%s", user.user_id)
         return response
 
@@ -1064,7 +1066,7 @@ def _set_cookie(response, key, token, max_age,path):
 
 def _clear_auth_cookies(response):
     response.delete_cookie(access_token_cookie, path="/")
-    response.delete_cookie(refresh_token_cookie, path="/")
+    response.delete_cookie(refresh_token_cookie, path=refresh_token_path)
 
 class PushTokenAPIView(AuthenticatedAPIView):
     def post(self, request):

@@ -1,9 +1,12 @@
 # myapp/middleware.py
+from re import match
+
 from django.http import JsonResponse
 import json
 import base64
 
 from django.contrib.auth import authenticate
+from httpx import request
 from rest_framework.authentication import TokenAuthentication
 from rest_framework_simplejwt.tokens import AccessToken
 from django.http.multipartparser import MultiPartParser
@@ -53,6 +56,14 @@ class DebugAuthenticationMiddleware:
     def __call__(self, request):
         custom_auth_token = request.headers.get("CustomAuthToken")
         log_data = {"action":request.resolver_match,"method":request.method,"path":request.path,"request_data":None,"response_data":None,"status":None}
+        match = getattr(request, "resolver_match", None)
+        if not match:
+            return self.get_response(request)
+
+        allowed_apps = {"tracker", "user_management", "notifications"}
+        if match.app_name not in allowed_apps:
+            return self.get_response(request)
+
         if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"] and "/admin/login/" not in request.get_full_path() and request.body:
             content_type = (request.content_type or "").split(";")[0].strip().lower()
             if content_type == "application/json":
