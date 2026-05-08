@@ -1,7 +1,7 @@
 from django.db import models
 
 from tracker.constants import MILESTONE_STATUS_CHOICES
-from tracker.models.base import UUIDTimeStampedModel
+from sadhak_base.models import UUIDTimeStampedModel
 
 
 class Milestone(UUIDTimeStampedModel):

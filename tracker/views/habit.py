@@ -2,7 +2,7 @@ from django.utils import timezone
 from rest_framework import request, status
 from rest_framework.response import Response
 
-from tracker.models import Habit, TaskOccurrence
+from tracker.models import Habit, TaskOccurrence, OccurrenceReminder
 from tracker.serializers import HabitDetailSerializer, HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, generate_occurrences, mark_occurrence
 from tracker.views.mixins import TrackerAPIViewMixin
@@ -36,6 +36,7 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
             is_deleted=is_deleted,
             updated_at=timezone.now(),
         )
+        OccurrenceReminder.objects.filter(occurrence__habit_id=habit.id, is_deleted=False).update(is_deleted=True)
         soft_delete_owned_dependencies(habit)
         if habit.milestone:
             check_milestone_completion(habit.milestone)

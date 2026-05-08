@@ -154,22 +154,38 @@ class User(AbstractBaseUser, PermissionsMixin):
                 condition=models.Q(is_deleted=False),
                 name="unique_active_username")]
 
-class AuditLog(models.Model):
+class NotificationPreference(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="notification_pref")
+    notifications_enabled = models.BooleanField(default=True)
+    in_app_enabled = models.BooleanField(default=True)
+    push_enabled = models.BooleanField(default=True)
+    email_enabled = models.BooleanField(default=True)
 
-    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+class UserDeviceToken(models.Model):
+    PLATFORM_CHOICES = (
+        ("android", "Android"),
+        ("ios", "iOS"),
+        ("web", "Web"),
+    )
 
-    action = models.CharField(max_length=100)
-
-    endpoint = models.CharField(max_length=255)
-
-    ip_address = models.GenericIPAddressField(null=True)
-
-    device_type = models.CharField(max_length=300, null=True)
-
-    request_data = models.JSONField(null=True, blank=True)
-
-    response_data = models.JSONField(null=True, blank=True)
-
-    status_code = models.IntegerField()
-
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="device_tokens",
+    )
+    token = models.CharField(max_length=512, unique=True)
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "is_active"]),
+            models.Index(fields=["platform", "is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} - {self.platform}"

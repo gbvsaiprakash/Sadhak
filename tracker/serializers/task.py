@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
-
+from tracker.constants import REMINDER_MODE_SET
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Task, TaskOccurrence
 from tracker.serializers.common import TrackerValidationMixin, is_overdue, occurrence_stats, DependencyItemSerializer
@@ -14,6 +14,7 @@ from tracker.services import (
     generate_occurrences,
     regenerate_future_occurrences,
     reconcile_occurrences,
+    sync_occurrence_reminders_for_parent,
 )
 from tracker.services.dependency import get_dependencies, set_dependencies
 
@@ -95,7 +96,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         "day_of_month",
         "interval_hours",
     }
-
+    REMINDER_FIELDS = {"reminder_enabled", "reminder_mode_all", "reminder_offset"}
     VALID_WEEKDAYS = {1,2,3,4,5,6,0} #{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
     VALID_MONTHDAYS = set(range(1, 32))
     
@@ -131,6 +132,9 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             "completed_occurrences",
             "missed_occurrences",
             "skipped_occurrences",
+            "reminder_enabled",
+            "reminder_mode_all",
+            "reminder_offset",
             "occurrences",
             "dependencies",
             "dependency_items",
@@ -167,6 +171,57 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             attrs["duration_config"] = self.instance.duration_config
         else:
             attrs["duration_config"] = {"value": 30, "unit": "minutes"}
+    
+    def normalize_reminder_payload(self, reminder_enabled, reminder_mode_all, reminder_offset):
+        if not reminder_enabled:
+            return []
+
+        items = reminder_offset or [{"value": 30, "unit": "minutes", "modes": ["in-app"]}]
+        if not isinstance(items, list):
+            raise serializers.ValidationError({"reminder_offset": "Must be a list."})
+
+        normalized = []
+        seen = set()
+        shared_modes = None
+
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx} must be object."})
+
+            value = item.get("value")
+            unit = item.get("unit")
+            modes = item.get("modes")
+
+            # backward compatibility: old payload with single mode
+            if not modes and item.get("mode"):
+                modes = [item.get("mode")]
+
+            if not isinstance(value, int) or value <= 0:
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: value must be positive integer."})
+            if unit not in ("minutes", "hours"):
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: unit must be minutes or hours."})
+            if not isinstance(modes, list) or not modes:
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: modes must be non-empty list."})
+
+            # validate + normalize modes
+            clean_modes = sorted(set(modes))
+            if any(m not in REMINDER_MODE_SET for m in clean_modes):
+                raise serializers.ValidationError({"reminder_offset": f"Item {idx}: invalid mode in modes."})
+
+            if reminder_mode_all:
+                shared_modes = shared_modes or clean_modes
+                clean_modes = shared_modes
+
+            mins = value * 60 if unit == "hours" else value
+            for m in clean_modes:
+                dedupe_key = (mins, m)
+                if dedupe_key in seen:
+                    raise serializers.ValidationError({"reminder_offset": "Duplicate reminder entries (time + mode)."})
+                seen.add(dedupe_key)
+
+            normalized.append({"value": value, "unit": unit, "modes": clean_modes})
+
+        return normalized
 
     def _normalize_days(self, raw_days, frequency_type):
         if not raw_days:
@@ -303,6 +358,19 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
                 and o["scheduled_date"] >= start
                 and (end is None or o["scheduled_date"] <= end)
             ]
+        
+        normalized = []
+        for item in (data.get("reminder_offset") or []):
+            # backward compatibility for old stored records
+            if "modes" not in item:
+                if item.get("mode"):
+                    item["modes"] = [item["mode"]]
+                else:
+                    item["modes"] = ["in-app"]
+            item.pop("mode", None)  # enforce new API contract
+            normalized.append(item)
+
+        data["reminder_offset"] = normalized
         return data
 
     def validate(self, attrs):
@@ -312,6 +380,15 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         self.validate_frequency(attrs, require_end_date=True)
         self._effective_duration_config(attrs)
         self.validate_time_window(attrs)
+        reminder_enabled = attrs.get("reminder_enabled", getattr(self.instance, "reminder_enabled", False))
+        reminder_mode_all = attrs.get("reminder_mode_all", getattr(self.instance, "reminder_mode_all", True))
+        reminder_offset = attrs.get("reminder_offset", getattr(self.instance, "reminder_offset", []))
+
+        attrs["reminder_offset"] = self.normalize_reminder_payload(
+            reminder_enabled=reminder_enabled,
+            reminder_mode_all=reminder_mode_all,
+            reminder_offset=reminder_offset,
+        )
         return attrs
 
     def validate_active_parents(self, attrs):
@@ -385,6 +462,13 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         from_date = min(old_instance.start_date, new_instance.start_date)
         to_date = max(old_end, new_end)
         return from_date, to_date
+    
+    def _changed(self, instance, attrs, fields):
+        for f in fields:
+            if f in attrs and attrs.get(f) != getattr(instance, f):
+                return True
+        return False
+
 
     @transaction.atomic
     def create(self, validated_data):
@@ -408,9 +492,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         if instance.status == "cancelled":
             raise_tracker_error("CANNOT_MODIFY_CANCELLED", "Cancelled tasks cannot be modified.")
         deps = validated_data.pop("dependencies", None)
-        schedule_changed = any(f in validated_data for f in self.SCHEDULE_FIELDS)
+        schedule_changed = self._changed(instance, validated_data, self.SCHEDULE_FIELDS)
+        reminder_changed = self._changed(instance, validated_data, self.REMINDER_FIELDS)
         old_instance = Task.objects.get(pk=instance.pk)
         task = super().update(instance, validated_data)
+        self._schedule_changed = schedule_changed
+        self._reminder_changed = reminder_changed and not schedule_changed
         if deps is not None:
             set_dependencies(task, deps, self.context["request"].user)
 
@@ -430,6 +517,8 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             except TypeError:
                 # fallback for any unforeseen issues in reconciliation logic
                 generate_occurrences(task, from_date=effective_from, to_date=to_date)
+        elif reminder_changed:
+            sync_occurrence_reminders_for_parent(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:

@@ -1,14 +1,17 @@
 # myapp/middleware.py
+from re import match
+
 from django.http import JsonResponse
 import json
 import base64
 
 from django.contrib.auth import authenticate
+from httpx import request
 from rest_framework.authentication import TokenAuthentication
 from rest_framework_simplejwt.tokens import AccessToken
 from django.http.multipartparser import MultiPartParser
 from django.utils.datastructures import MultiValueDictKeyError
-from user_management.models import AuditLog
+from sadhak_base.models import AuditLog
 
 from user_management.models import User
 # from utils import set_current_user
@@ -53,8 +56,28 @@ class DebugAuthenticationMiddleware:
     def __call__(self, request):
         custom_auth_token = request.headers.get("CustomAuthToken")
         log_data = {"action":request.resolver_match,"method":request.method,"path":request.path,"request_data":None,"response_data":None,"status":None}
-        if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"] and request.body:
-            log_data["request_data"] = remove_token_fields(json.loads(request.body))
+        match = getattr(request, "resolver_match", None)
+        if not match:
+            return self.get_response(request)
+
+        allowed_apps = {"tracker", "user_management", "notifications"}
+        if match.app_name not in allowed_apps:
+            return self.get_response(request)
+
+        if request.get_full_path() not in ["api/user/login/", "/api/user/token/refresh/"] and "/admin/login/" not in request.get_full_path() and request.body:
+            content_type = (request.content_type or "").split(";")[0].strip().lower()
+            if content_type == "application/json":
+                try:
+                    body_data = json.loads(request.body.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    body_data = None
+            else:
+                # admin/forms: application/x-www-form-urlencoded or multipart/form-data
+                try:
+                    body_data = request.POST.dict() if request.method in ("POST", "PUT", "PATCH") else None
+                except Exception:
+                    body_data = None
+            log_data["request_data"] = remove_token_fields(body_data) if body_data else None
 
         if custom_auth_token:
             request.META["HTTP_AUTHORIZATION"] = f"Bearer {custom_auth_token}"

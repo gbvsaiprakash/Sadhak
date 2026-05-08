@@ -15,6 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 import sys
+from django.core.exceptions import ImproperlyConfigured
 # Load variables from .env file
 load_dotenv()
 
@@ -50,6 +51,7 @@ INSTALLED_APPS = [
     'corsheaders', # needed if frontend is on other origin
     'user_management',
     'tracker',
+    'sadhak_base',
 
 ]
 
@@ -183,6 +185,11 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOW_ALL_ORIGINS = False
+CSRF_TRUSTED_ORIGINS = [
+    os.getenv("frontend_url_numeric"),
+    os.getenv("frontend_url"),
+]
+
 CORS_ALLOWED_ORIGINS = [
     os.getenv("frontend_url_numeric"),
     os.getenv("frontend_url"),
@@ -231,3 +238,36 @@ SIMPLE_JWT = {
     "USER_ID_CLAIM": "user_id",
     "ALGORITHM": "HS256",
 }
+
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
+# CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND")
+if not CELERY_BROKER_URL:
+    raise ImproperlyConfigured("CELERY_BROKER_URL is missing")
+if "://" not in CELERY_BROKER_URL:
+    raise ImproperlyConfigured(f"Invalid CELERY_BROKER_URL: {CELERY_BROKER_URL!r}")
+CELERY_TIMEZONE = TIME_ZONE
+# only enable SSL setting if the broker is redis
+# CELERY_BROKER_USE_SSL = {"ssl_cert_reqs": "none"}
+# CELERY_REDIS_BACKEND_USE_SSL = {"ssl_cert_reqs": "none"}
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+# CELERY_RESULT_SERIALIZER = "json"
+CELERY_WORKER_ENABLE_REMOTE_CONTROL = False
+CELERY_TASK_IGNORE_RESULT = True
+
+
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    "emit-due-reminder-events-every-minute": {
+        "task": "sadhak_base.tasks.emit_due_reminder_events_task",
+        "schedule": crontab(minute="*"),
+    },
+    "process-pending-domain-events-every-minute": {
+        "task": "sadhak_base.tasks.process_pending_domain_events",
+        "schedule": crontab(minute="*"),
+        "kwargs": {"batch_size": 200},
+    },
+}
+
+FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH")

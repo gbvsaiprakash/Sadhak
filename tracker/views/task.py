@@ -2,6 +2,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from django.utils import timezone
 from tracker.models import Task, TaskOccurrence
+from tracker.models.occurrence import OccurrenceReminder
 from tracker.serializers import TaskDetailSerializer, TaskListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, mark_occurrence, sync_task_status_from_occurrences
 from tracker.views.mixins import TrackerAPIViewMixin
@@ -27,12 +28,13 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
 
     def cancel_task(self, task):
         ensure_not_depended_on(task)
+        task.status = "cancelled"
+        task.save(update_fields=["status", "updated_at"])
         TaskOccurrence.objects.filter(task=task, status="pending").update(
             status="cancelled",
             updated_at=timezone.now(),
         )
-        task.status = "cancelled"
-        task.save(update_fields=["status", "updated_at"])
+        OccurrenceReminder.objects.filter(occurrence__task=task, is_deleted=False).update(is_deleted=True)
         soft_delete_owned_dependencies(task)
         if task.milestone:
             check_milestone_completion(task.milestone)
@@ -44,6 +46,8 @@ class TaskBaseAPIView(TrackerAPIViewMixin):
         task.is_deleted = True
         task.save(update_fields=["is_deleted", "updated_at"])
         soft_delete_owned_dependencies(task)
+        TaskOccurrence.objects.filter(task=task, is_deleted=False).update(is_deleted=True)
+        OccurrenceReminder.objects.filter(occurrence__task=task, is_deleted=False).update(is_deleted=True)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:
