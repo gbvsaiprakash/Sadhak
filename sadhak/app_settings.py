@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 import os
-
+import json
 # Load variables from .env file
 load_dotenv()
 
@@ -22,4 +22,5 @@ SCOPE_SETUP_PASSWORD = os.getenv("SCOPE_SETUP_PASSWORD")
 SCOPE_ACCOUNT_DELETE = os.getenv("SCOPE_ACCOUNT_REMOVE")
 refresh_token_path = os.getenv("REFRESH_PATH")
 POST_DUE_GRACE_MIN = int(os.getenv("POST_DUE_GRACE_MIN"))
+SYSTEM_DEFAULT_EXPENSES = json.loads(os.getenv("SYSTEM_DEFAULT_EXPENSES"))
 
