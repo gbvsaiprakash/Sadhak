@@ -1,7 +1,8 @@
 import csv
 from datetime import timedelta
 from decimal import Decimal
-
+import json
+import os
 from django.db.models import Count, Sum, Q
 from django.db.models.functions import TruncDate, TruncMonth, TruncQuarter, TruncWeek, TruncYear
 from django.http import HttpResponse
@@ -13,7 +14,10 @@ from user_management.views import AuthenticatedAPIView
 from .models import BudgetAllocation, ExpenseEntry, ExpenseReportPreference
 from .serializers import BudgetAllocationSerializer, ExpenseEntrySerializer, ExpenseReportPreferenceSerializer
 
-
+try:
+    SYSTEM_DEFAULTS = json.loads(os.getenv("SYSTEM_DEFAULT_EXPENSES", "{}"))
+except json.JSONDecodeError:
+    SYSTEM_DEFAULTS = {}
 
 
 
@@ -71,16 +75,164 @@ class ExpenseBaseAPIView(AuthenticatedAPIView):
             )
         return queryset
 
-
 class ExpenseSuggestionsAPIView(ExpenseBaseAPIView):
+    def _find_case_insensitive(self, values, target):
+        target_key = (target or "").strip().lower()
+        if not target_key:
+            return None
+        for value in values:
+            if (value or "").strip().lower() == target_key:
+                return value
+        return None
+
+    def _build_default_tree(self):
+        if isinstance(SYSTEM_DEFAULTS, dict):
+            return SYSTEM_DEFAULTS
+        return {}
+
+    def _build_merged_tree(self, user):
+        default_tree = self._build_default_tree()
+        history_qs = ExpenseEntry.objects.filter(user=user, is_deleted=False)
+
+        tree = {}
+        for main, sub_map in default_tree.items():
+            main_name = " ".join(str(main).split())
+            if not main_name:
+                continue
+            tree.setdefault(main_name, {})
+            if isinstance(sub_map, dict):
+                for sub, item_list in sub_map.items():
+                    sub_name = " ".join(str(sub).split())
+                    if not sub_name:
+                        continue
+                    tree[main_name].setdefault(sub_name, set())
+                    if isinstance(item_list, list):
+                        for item in item_list:
+                            item_name = " ".join(str(item).split())
+                            if item_name:
+                                tree[main_name][sub_name].add(item_name)
+
+        for main, sub, item in history_qs.values_list("main_category", "sub_category", "item"):
+            main_name = " ".join((main or "").split())
+            sub_name = " ".join((sub or "").split())
+            item_name = " ".join((item or "").split())
+            if not main_name:
+                continue
+            tree.setdefault(main_name, {})
+            if sub_name:
+                tree[main_name].setdefault(sub_name, set())
+                if item_name:
+                    tree[main_name][sub_name].add(item_name)
+        return tree
+
     def get(self, request):
-        qs = ExpenseEntry.objects.filter(user=request.user, is_deleted=False)
+        request_type = (request.query_params.get("type") or "all").strip().lower()
+        if request_type not in {"all", "main_category", "sub_category", "item"}:
+            return Response(
+                {"message": "Invalid type. Allowed values: all, main_category, sub_category, item."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        main_categories = _dedupe_case_insensitive(SYSTEM_DEFAULTS["main_categories"] + list(qs.exclude(main_category="").values_list("main_category", flat=True).distinct()))
-        sub_categories = _dedupe_case_insensitive(SYSTEM_DEFAULTS["sub_categories"] + list(qs.exclude(sub_category="").values_list("sub_category", flat=True).distinct()))
-        items = _dedupe_case_insensitive(SYSTEM_DEFAULTS["items"] + list(qs.exclude(item="").values_list("item", flat=True).distinct()))
+        selected_main = (request.query_params.get("main_category") or "").strip()
+        selected_sub = (request.query_params.get("sub_category") or "").strip()
+        selected_item = (request.query_params.get("item") or "").strip()
 
-        return Response({"main_categories": main_categories, "sub_categories": sub_categories, "items": items}, status=status.HTTP_200_OK)
+        tree = self._build_merged_tree(request.user)
+        main_categories = _dedupe_case_insensitive(list(tree.keys()))
+
+        # Match selected values to canonical values from tree.
+        matched_main = self._find_case_insensitive(main_categories, selected_main)
+
+        all_subs = _dedupe_case_insensitive([sub for sub_map in tree.values() for sub in sub_map.keys()])
+        matched_sub = self._find_case_insensitive(all_subs, selected_sub)
+
+        all_items = _dedupe_case_insensitive([i for sub_map in tree.values() for items in sub_map.values() for i in items])
+        matched_item = self._find_case_insensitive(all_items, selected_item)
+
+        # Find all branches that satisfy selected filters at any level.
+        branches = []
+        for main, sub_map in tree.items():
+            for sub, items_set in sub_map.items():
+                branch_items = list(items_set)
+                if matched_main and main.lower() != matched_main.lower():
+                    continue
+                if matched_sub and sub.lower() != matched_sub.lower():
+                    continue
+                if matched_item and all(i.lower() != matched_item.lower() for i in branch_items):
+                    continue
+                branches.append((main, sub, branch_items))
+
+        # If no direct branch match and only item is provided, do reverse lookup by item.
+        if not branches and matched_item:
+            for main, sub_map in tree.items():
+                for sub, items_set in sub_map.items():
+                    if any(i.lower() == matched_item.lower() for i in items_set):
+                        branches.append((main, sub, list(items_set)))
+
+        # Derive inferred values for auto-fill on UI.
+        inferred_main = _dedupe_case_insensitive([b[0] for b in branches])
+        inferred_sub = _dedupe_case_insensitive([b[1] for b in branches])
+        inferred_items = _dedupe_case_insensitive([i for _, _, branch_items in branches for i in branch_items])
+
+        # Compute suggestion lists depending on current selections.
+        if branches:
+            scoped_main = inferred_main
+            scoped_sub = inferred_sub
+            scoped_items = inferred_items
+        else:
+            scoped_main = main_categories
+            scoped_sub = all_subs
+            scoped_items = all_items
+
+        # If only main is selected, scope sub/items by that main.
+        if matched_main and not matched_sub and not matched_item:
+            sub_source = list(tree.get(matched_main, {}).keys())
+            item_source = [i for items in tree.get(matched_main, {}).values() for i in items]
+            scoped_sub = _dedupe_case_insensitive(sub_source)
+            scoped_items = _dedupe_case_insensitive(item_source)
+
+        # If main+sub selected, items must come from exact branch.
+        if matched_main and matched_sub and not matched_item:
+            scoped_items = _dedupe_case_insensitive(list(tree.get(matched_main, {}).get(matched_sub, set())))
+            scoped_sub = [matched_sub] if matched_sub else scoped_sub
+
+        payload_common = {
+            "selected": {
+                "main_category": matched_main,
+                "sub_category": matched_sub,
+                "item": matched_item,
+            },
+            "inferred": {
+                "main_categories": inferred_main,
+                "sub_categories": inferred_sub,
+                "items": inferred_items,
+                "auto_main_category": inferred_main[0] if len(inferred_main) == 1 else None,
+                "auto_sub_category": inferred_sub[0] if len(inferred_sub) == 1 else None,
+            },
+        }
+
+        if request_type == "main_category":
+            return Response({"main_categories": scoped_main, **payload_common}, status=status.HTTP_200_OK)
+        if request_type == "sub_category":
+            return Response({"sub_categories": scoped_sub, **payload_common}, status=status.HTTP_200_OK)
+        if request_type == "item":
+            return Response({"items": scoped_items, **payload_common}, status=status.HTTP_200_OK)
+
+        response_tree = {
+            main: {sub: sorted(list(items_set), key=lambda x: x.lower()) for sub, items_set in sub_map.items()}
+            for main, sub_map in tree.items()
+        }
+
+        return Response(
+            {
+                "main_categories": scoped_main,
+                "sub_categories": scoped_sub,
+                "items": scoped_items,
+                "tree": response_tree,
+                **payload_common,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class BudgetAllocationListCreateAPIView(ExpenseBaseAPIView):
