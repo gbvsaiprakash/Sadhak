@@ -6,30 +6,60 @@ from django.db import models
 from django.db.models.functions import Lower
 from sadhak_base.models import UUIDTimeStampedModel
 
-
-class BudgetAllocation(UUIDTimeStampedModel):
-    FREQUENCY_CHOICES = (
-        ("weekly", "Weekly"),
+class BudgetPlan(models.Model):
+    PERIOD_CHOICES = (
         ("monthly", "Monthly"),
-        ("quarterly", "Quarterly"),
         ("yearly", "Yearly"),
+        ("custom", "Custom"),
     )
 
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="budget_allocations")
-    main_category = models.CharField(max_length=120, blank=True, default="", null=True)
-    sub_category = models.CharField(max_length=120, blank=True, default="")
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
-    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default="monthly")
-    start_date = models.DateField()
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="budget_plans")
+    name = models.CharField(max_length=150)
+    period_type = models.CharField(max_length=20, choices=PERIOD_CHOICES)
+    year = models.PositiveIntegerField(null=True, blank=True)
+    month = models.PositiveSmallIntegerField(null=True, blank=True)
+    start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
-    notes = models.CharField(max_length=300, blank=True, default="")
+    currency = models.CharField(max_length=10, default="INR")
     is_active = models.BooleanField(default=True)
+    is_deleted = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=["user", "frequency", "is_active"]),
-            models.Index(fields=["start_date", "end_date"]),
+            models.Index(fields=["user", "period_type", "is_active"]),
+            models.Index(fields=["year", "month"]),
+        ]
+
+
+class BudgetAllocationLine(models.Model):
+    ROLLUP_CHOICES = (
+        ("category", "Category"),
+        ("subcategory", "Sub Category"),
+        ("item", "Item"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    budget_plan = models.ForeignKey(BudgetPlan, on_delete=models.CASCADE, related_name="lines")
+    main_category = models.CharField(max_length=120)
+    sub_category = models.CharField(max_length=120, blank=True, default="")
+    item = models.CharField(max_length=160, blank=True, default="")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    rollup_level = models.CharField(max_length=20, choices=ROLLUP_CHOICES, default="item")
+    notes = models.CharField(max_length=300, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    is_deleted = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["budget_plan", "main_category", "sub_category", "item"]),
+            models.Index(fields=["is_active", "is_deleted"]),
         ]
 
 

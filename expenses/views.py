@@ -1,8 +1,9 @@
 import csv
-from datetime import timedelta
+from datetime import timedelta, date
 from decimal import Decimal
 import json
 import os
+from calendar import monthrange
 from django.db.models import Count, Sum, Q
 from django.db.models.functions import TruncDate, TruncMonth, TruncQuarter, TruncWeek, TruncYear
 from django.http import HttpResponse
@@ -11,8 +12,8 @@ from rest_framework import status
 from rest_framework.response import Response
 from sadhak.app_settings import SYSTEM_DEFAULT_EXPENSES as SYSTEM_DEFAULTS
 from user_management.views import AuthenticatedAPIView
-from .models import BudgetAllocation, ExpenseEntry, ExpenseReportPreference
-from .serializers import BudgetAllocationSerializer, ExpenseEntrySerializer, ExpenseReportPreferenceSerializer
+from .models import ExpenseEntry, ExpenseReportPreference, BudgetAllocationLine, BudgetPlan
+from .serializers import ExpenseEntrySerializer, ExpenseReportPreferenceSerializer, BudgetAllocationLineBulkSerializer, BudgetAllocationLineSerializer, BudgetPlanSerializer
 
 try:
     SYSTEM_DEFAULTS = json.loads(os.getenv("SYSTEM_DEFAULT_EXPENSES", "{}"))
@@ -32,6 +33,34 @@ def _dedupe_case_insensitive(values):
             seen[key] = value
     return sorted(seen.values(), key=lambda v: v.lower())
 
+def _month_last_day(year, month):
+    return date(year, month, monthrange(year, month)[1])
+
+
+def _next_month(year, month):
+    return (year + 1, 1) if month == 12 else (year, month + 1)
+
+
+def _can_create_monthly_plan(year, month, today=None):
+    today = today or timezone.localdate()
+    if month == 1:
+        prev_y, prev_m = year - 1, 12
+    else:
+        prev_y, prev_m = year, month - 1
+    window_start = _month_last_day(prev_y, prev_m)
+    window_end = _month_last_day(year, month)
+    return window_start <= today <= window_end
+
+
+def _has_active_conflict(user, period_type, year=None, month=None, exclude_id=None):
+    qs = BudgetPlan.objects.filter(user=user, is_deleted=False, is_active=True, period_type=period_type)
+    if exclude_id:
+        qs = qs.exclude(id=exclude_id)
+    if period_type == "monthly":
+        return qs.filter(year=year, month=month).exists()
+    if period_type == "yearly":
+        return qs.filter(year=year).exists()
+    return False
 
 class ExpenseBaseAPIView(AuthenticatedAPIView):
     def _parse_date(self, value, default):
@@ -74,6 +103,14 @@ class ExpenseBaseAPIView(AuthenticatedAPIView):
                 | Q(main_category__icontains=search)
             )
         return queryset
+    
+    def _current_plan_queryset(self, user):
+        today = timezone.localdate()
+        return BudgetPlan.objects.filter(user=user, is_deleted=False, is_active=True).filter(
+            Q(period_type="yearly", year=today.year)
+            | Q(period_type="monthly", year=today.year, month=today.month)
+            | Q(period_type="custom", start_date__lte=today, end_date__gte=today)
+        )
 
 class ExpenseSuggestionsAPIView(ExpenseBaseAPIView):
     def _find_case_insensitive(self, values, target):
@@ -93,6 +130,8 @@ class ExpenseSuggestionsAPIView(ExpenseBaseAPIView):
     def _build_merged_tree(self, user):
         default_tree = self._build_default_tree()
         history_qs = ExpenseEntry.objects.filter(user=user, is_deleted=False)
+        budget_qs = BudgetPlan.objects.filter(user=user, is_deleted=False)
+        history_budget_qs = BudgetAllocationLine.objects.filter(budget_plan__in=budget_qs, is_deleted=False)
 
         tree = {}
         for main, sub_map in default_tree.items():
@@ -123,6 +162,19 @@ class ExpenseSuggestionsAPIView(ExpenseBaseAPIView):
                 tree[main_name].setdefault(sub_name, set())
                 if item_name:
                     tree[main_name][sub_name].add(item_name)
+        
+        for main, sub, item in history_budget_qs.values_list("main_category", "sub_category", "item"):
+            main_name = " ".join((main or "").split())
+            sub_name = " ".join((sub or "").split())
+            item_name = " ".join((item or "").split())
+            if not main_name:
+                continue
+            tree.setdefault(main_name, {})
+            if sub_name:
+                tree[main_name].setdefault(sub_name, set())
+                if item_name:
+                    tree[main_name][sub_name].add(item_name)
+        
         return tree
 
     def get(self, request):
@@ -235,40 +287,229 @@ class ExpenseSuggestionsAPIView(ExpenseBaseAPIView):
         )
 
 
-class BudgetAllocationListCreateAPIView(ExpenseBaseAPIView):
+class BudgetPlanListCreateAPIView(ExpenseBaseAPIView):
     def get(self, request):
-        queryset = BudgetAllocation.objects.filter(user=request.user, is_deleted=False).order_by("-created_at")
-        return Response(BudgetAllocationSerializer(queryset, many=True).data)
+        queryset = BudgetPlan.objects.filter(user=request.user, is_deleted=False).order_by("-created_at")
+        return Response(BudgetPlanSerializer(queryset, many=True).data)
 
     def post(self, request):
-        serializer = BudgetAllocationSerializer(data=request.data)
+        serializer = BudgetPlanSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save(user=request.user)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-class BudgetAllocationDetailAPIView(ExpenseBaseAPIView):
+class BudgetPlanDetailAPIView(ExpenseBaseAPIView):
     def _get_object(self, request, pk):
-        return BudgetAllocation.objects.filter(user=request.user, is_deleted=False, id=pk).first()
+        return BudgetPlan.objects.filter(user=request.user, is_deleted=False, id=pk).first()
+
+    def get(self, request, pk):
+        plan = self._get_object(request, pk)
+        if not plan:
+            return Response({"message": "Budget plan not found"}, status=status.HTTP_404_NOT_FOUND)
+        data = BudgetPlanSerializer(plan).data
+        data["lines"] = BudgetAllocationLineSerializer(plan.lines.filter(is_deleted=False), many=True).data
+        return Response(data)
 
     def patch(self, request, pk):
-        budget = self._get_object(request, pk)
-        if not budget:
-            return Response({"message": "Budget allocation not found"}, status=status.HTTP_404_NOT_FOUND)
-        serializer = BudgetAllocationSerializer(budget, data=request.data, partial=True)
+        plan = self._get_object(request, pk)
+        if not plan:
+            return Response({"message": "Budget plan not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        serializer = BudgetPlanSerializer(plan, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
 
     def delete(self, request, pk):
-        budget = self._get_object(request, pk)
-        if not budget:
-            return Response({"message": "Budget allocation not found"}, status=status.HTTP_404_NOT_FOUND)
-        budget.is_deleted = True
-        budget.is_active = False
-        budget.save(update_fields=["is_deleted", "is_active", "updated_at"])
+        plan = self._get_object(request, pk)
+        if not plan:
+            return Response({"message": "Budget plan not found"}, status=status.HTTP_404_NOT_FOUND)
+        plan.is_deleted = True
+        plan.is_active = False
+        plan.save(update_fields=["is_deleted", "is_active", "updated_at"])
+        plan.lines.filter(is_deleted=False).update(is_deleted=True, is_active=False, updated_at=timezone.now())
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+
+class BudgetPlanLineListCreateAPIView(ExpenseBaseAPIView):
+    def _get_plan(self, request, budget_id):
+        return BudgetPlan.objects.filter(user=request.user, is_deleted=False, id=budget_id).first()
+
+    def get(self, request, budget_id):
+        plan = self._get_plan(request, budget_id)
+        if not plan:
+            return Response({"message": "Budget plan not found"}, status=status.HTTP_404_NOT_FOUND)
+        queryset = plan.lines.filter(is_deleted=False).order_by("-created_at")
+        return Response(BudgetAllocationLineSerializer(queryset, many=True).data)
+
+    def post(self, request, budget_id):
+        plan = self._get_plan(request, budget_id)
+        if not plan:
+            return Response({"message": "Budget plan not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if isinstance(request.data, dict) and isinstance(request.data.get("lines"), list):
+            for line_data in request.data["lines"]:
+                line_data["budget_plan"] = budget_id
+            serializer = BudgetAllocationLineBulkSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            created = []
+            for line_data in serializer.validated_data["lines"]:
+                line_data["budget_plan"] = plan
+                created.append(BudgetAllocationLine.objects.create(**line_data))
+            return Response(BudgetAllocationLineSerializer(created, many=True).data, status=status.HTTP_201_CREATED)
+
+        if isinstance(request.data, dict):
+            request.data["budget_plan"] = budget_id
+        serializer = BudgetAllocationLineSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(budget_plan=plan)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class BudgetPlanLineDetailAPIView(ExpenseBaseAPIView):
+    def _get_line(self, request, budget_id, line_id):
+        return BudgetAllocationLine.objects.filter(budget_plan__user=request.user, budget_plan_id=budget_id, is_deleted=False, id=line_id).first()
+
+    def patch(self, request, budget_id, line_id):
+        line = self._get_line(request, budget_id, line_id)
+        if not line:
+            return Response({"message": "Budget line not found"}, status=status.HTTP_404_NOT_FOUND)
+        request.data["budget_plan"] = budget_id
+        serializer = BudgetAllocationLineSerializer(line, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def delete(self, request, budget_id, line_id):
+        line = self._get_line(request, budget_id, line_id)
+        if not line:
+            return Response({"message": "Budget line not found"}, status=status.HTTP_404_NOT_FOUND)
+        line.is_deleted = True
+        line.is_active = False
+        line.save(update_fields=["is_deleted", "is_active", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class BudgetPlanTrackingAPIView(ExpenseBaseAPIView):
+    def _get_plan(self, request, budget_id):
+        return BudgetPlan.objects.filter(user=request.user, is_deleted=False, id=budget_id).first()
+
+    def get(self, request, budget_id):
+        plan = self._get_plan(request, budget_id)
+        if not plan:
+            return Response({"message": "Budget plan not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        expenses = ExpenseEntry.objects.filter(user=request.user, is_deleted=False)
+        if plan.period_type == "monthly" and plan.year and plan.month:
+            expenses = expenses.filter(spent_at__year=plan.year, spent_at__month=plan.month)
+        elif plan.period_type == "yearly" and plan.year:
+            expenses = expenses.filter(spent_at__year=plan.year)
+        elif plan.period_type == "custom" and plan.start_date and plan.end_date:
+            expenses = expenses.filter(spent_at__date__gte=plan.start_date, spent_at__date__lte=plan.end_date)
+
+        lines = plan.lines.filter(is_deleted=False, is_active=True)
+        total_budget = lines.aggregate(total=Sum("amount")).get("total") or Decimal("0.00")
+        total_spent = expenses.aggregate(total=Sum("amount")).get("total") or Decimal("0.00")
+
+        line_rows = []
+        for line in lines:
+            line_exp = expenses.filter(main_category__iexact=line.main_category)
+            if line.sub_category:
+                line_exp = line_exp.filter(sub_category__iexact=line.sub_category)
+            if line.item:
+                line_exp = line_exp.filter(item__iexact=line.item)
+            line_spent = line_exp.aggregate(total=Sum("amount")).get("total") or Decimal("0.00")
+            line_rows.append({
+                "line_id": str(line.id),
+                "main_category": line.main_category,
+                "sub_category": line.sub_category,
+                "item": line.item,
+                "budget_amount": line.amount,
+                "spent_amount": line_spent,
+                "remaining_amount": line.amount - line_spent,
+                "rollup_level": line.rollup_level,
+            })
+
+        return Response(
+            {
+                "budget_plan": BudgetPlanSerializer(plan).data,
+                "summary": {
+                    "total_budget": total_budget,
+                    "total_spent": total_spent,
+                    "total_remaining": total_budget - total_spent,
+                },
+                "lines": line_rows,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+class BudgetPlanCloneAPIView(ExpenseBaseAPIView):
+    def _get_plan(self, request, budget_id):
+        return BudgetPlan.objects.filter(user=request.user, is_deleted=False, id=budget_id).first()
+
+    def post(self, request, budget_id):
+        source = self._get_plan(request, budget_id)
+        if not source:
+            return Response({"message": "Budget plan not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        period_type = request.data.get("period_type") or source.period_type
+        year = request.data.get("year")
+        month = request.data.get("month")
+        start_date = request.data.get("start_date")
+        end_date = request.data.get("end_date")
+
+        if period_type == "monthly":
+            if year is None or month is None:
+                if source.period_type == "monthly" and source.year and source.month:
+                    year, month = _next_month(source.year, source.month)
+                else:
+                    today = timezone.localdate()
+                    year, month = _next_month(today.year, today.month)
+            year, month = int(year), int(month)
+            if not _can_create_monthly_plan(year, month):
+                return Response({"message": f"Monthly budget for {month}/{year} can be created only between previous month end and month end."}, status=status.HTTP_400_BAD_REQUEST)
+            if _has_active_conflict(request.user, "monthly", year=year, month=month):
+                return Response({"message": "An active monthly budget already exists for this month/year."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if period_type == "yearly":
+            if year is None:
+                year = (source.year + 1) if source.year else (timezone.localdate().year + 1)
+            year = int(year)
+            if _has_active_conflict(request.user, "yearly", year=year):
+                return Response({"message": "An active yearly budget already exists for this year."}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload = {
+            "name": request.data.get("name") or f"{source.name} (Copy)",
+            "period_type": period_type,
+            "year": year if period_type in {"monthly", "yearly"} else None,
+            "month": month if period_type == "monthly" else None,
+            "start_date": start_date if period_type == "custom" else None,
+            "end_date": end_date if period_type == "custom" else None,
+            "currency": request.data.get("currency") or source.currency,
+            "is_active": request.data.get("is_active", True),
+        }
+
+        serializer = BudgetPlanSerializer(data=payload, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        cloned = serializer.save(user=request.user)
+
+        source_lines = source.lines.filter(is_deleted=False)
+        for line in source_lines:
+            BudgetAllocationLine.objects.create(
+                budget_plan=cloned,
+                main_category=line.main_category,
+                sub_category=line.sub_category,
+                item=line.item,
+                amount=line.amount,
+                rollup_level=line.rollup_level,
+                notes=line.notes,
+                is_active=line.is_active,
+            )
+
+        data = BudgetPlanSerializer(cloned).data
+        data["lines"] = BudgetAllocationLineSerializer(cloned.lines.filter(is_deleted=False), many=True).data
+        return Response(data, status=status.HTTP_201_CREATED)
 
 class ExpenseEntryListCreateAPIView(ExpenseBaseAPIView):
     def get(self, request):
@@ -323,19 +564,75 @@ class ExpenseAnalyticsAPIView(ExpenseBaseAPIView):
 
 
 class ExpenseDashboardAPIView(ExpenseBaseAPIView):
+    def _period_bounds_for_plan(self, plan):
+        if plan.period_type == "monthly" and plan.year and plan.month:
+            return date(plan.year, plan.month, 1), _month_last_day(plan.year, plan.month)
+        if plan.period_type == "yearly" and plan.year:
+            return date(plan.year, 1, 1), date(plan.year, 12, 31)
+        if plan.period_type == "custom" and plan.start_date and plan.end_date:
+            return plan.start_date, plan.end_date
+        return None, None
+
     def get(self, request):
         queryset = self._base_expense_queryset(request)
         total_spent = queryset.aggregate(total=Sum("amount")).get("total") or Decimal("0.00")
         total_entries = queryset.count()
 
-        budgets = BudgetAllocation.objects.filter(user=request.user, is_deleted=False, is_active=True)
-        budget_total = budgets.aggregate(total=Sum("amount")).get("total") or Decimal("0.00")
+        from_date = self._parse_date(request.query_params.get("from_date"), timezone.localdate() - timedelta(days=30))
+        to_date = self._parse_date(request.query_params.get("to_date"), timezone.localdate())
+
+        main_category = request.query_params.get("main_category")
+        sub_category = request.query_params.get("sub_category")
+        item = request.query_params.get("item")
+        search = request.query_params.get("search")
+
+        active_plans = BudgetPlan.objects.filter(user=request.user, is_deleted=False, is_active=True)
+        scoped_plan_ids = []
+        for plan in active_plans:
+            p_start, p_end = self._period_bounds_for_plan(plan)
+            if p_start and p_end and p_start <= to_date and p_end >= from_date:
+                scoped_plan_ids.append(plan.id)
+
+        plan_lines = BudgetAllocationLine.objects.filter(
+            budget_plan_id__in=scoped_plan_ids,
+            is_deleted=False,
+            is_active=True,
+        )
+
+        if main_category:
+            plan_lines = plan_lines.filter(main_category__iexact=main_category)
+        if sub_category:
+            plan_lines = plan_lines.filter(sub_category__iexact=sub_category)
+        if item:
+            plan_lines = plan_lines.filter(item__iexact=item)
+        if search:
+            plan_lines = plan_lines.filter(
+                Q(notes__icontains=search)
+                | Q(item__icontains=search)
+                | Q(sub_category__icontains=search)
+                | Q(main_category__icontains=search)
+            )
+
+        budget_total = plan_lines.aggregate(total=Sum("amount")).get("total") or Decimal("0.00")
+        has_budget = budget_total > 0
+        remaining_budget = max(budget_total - total_spent, Decimal("0.00"))
+        over_budget_amount = max(total_spent - budget_total, Decimal("0.00"))
+        utilization_pct = (total_spent / budget_total * Decimal("100.00")) if budget_total > 0 else Decimal("0.00")
 
         recent_expenses = ExpenseEntrySerializer(queryset.order_by("-spent_at")[:10], many=True).data
         top_items = queryset.values("item").annotate(total=Sum("amount"), count=Count("id")).order_by("-total")[:10]
 
         return Response({
-            "totals": {"spent": total_spent, "budget": budget_total, "remaining": budget_total - total_spent, "entries": total_entries},
+            "totals": {
+                "spent": total_spent,
+                "budget": budget_total,
+                "remaining": remaining_budget,
+                "entries": total_entries,
+                "has_budget": has_budget,
+                "over_budget_amount": over_budget_amount,
+                "utilization_pct": round(utilization_pct, 2),
+                "is_over_budget": over_budget_amount > 0,
+            },
             "top_items": list(top_items),
             "recent_expenses": recent_expenses,
             "applied_filters": {
