@@ -620,7 +620,17 @@ class ExpenseDashboardAPIView(ExpenseBaseAPIView):
         utilization_pct = (total_spent / budget_total * Decimal("100.00")) if budget_total > 0 else Decimal("0.00")
 
         recent_expenses = ExpenseEntrySerializer(queryset.order_by("-spent_at")[:10], many=True).data
-        top_items = queryset.values("item").annotate(total=Sum("amount"), count=Count("id")).order_by("-total")[:10]
+        top_items_qs = queryset.values("item").annotate(total=Sum("amount"), count=Count("id")).order_by("-total")[:10]
+        top_items = []
+        for row in top_items_qs:
+            item_total = row.get("total") or Decimal("0.00")
+            pct = (item_total / total_spent * Decimal("100.00")) if total_spent > 0 else Decimal("0.00")
+            top_items.append({
+                "item": row.get("item"),
+                "total": item_total,
+                "count": row.get("count", 0),
+                "percentage": round(pct, 2),
+            })
 
         return Response({
             "totals": {
