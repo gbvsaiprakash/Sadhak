@@ -111,6 +111,8 @@ class ExpenseReportPreference(UUIDTimeStampedModel):
     delivery_email = models.EmailField(blank=True, default="")
     report_format = models.CharField(max_length=20, choices=FORMAT_CHOICES, default="json")
     include_budget_vs_actual = models.BooleanField(default=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    next_run_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -122,3 +124,20 @@ def quantize_amount(value):
     if value is None:
         return Decimal("0.00")
     return Decimal(value).quantize(Decimal("0.01"))
+
+class ExpenseReportDeliveryLog(UUIDTimeStampedModel):
+    STATUS_CHOICES = (
+        ("success", "Success"),
+        ("failure", "Failure"),
+    )
+
+    preference = models.ForeignKey(ExpenseReportPreference, on_delete=models.CASCADE, related_name="delivery_logs")
+    delivered_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    error_message = models.TextField(blank=True, default="")
+    period_start = models.DateField()
+    period_end = models.DateField()
+
+    class Meta:
+        ordering = ["-delivered_at"]
+        indexes = [models.Index(fields=["preference", "status"])]

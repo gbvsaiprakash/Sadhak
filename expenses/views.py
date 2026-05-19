@@ -14,6 +14,7 @@ from sadhak.app_settings import SYSTEM_DEFAULT_EXPENSES as SYSTEM_DEFAULTS
 from user_management.views import AuthenticatedAPIView
 from .models import ExpenseEntry, ExpenseReportPreference, BudgetAllocationLine, BudgetPlan
 from .serializers import ExpenseEntrySerializer, ExpenseReportPreferenceSerializer, BudgetAllocationLineBulkSerializer, BudgetAllocationLineSerializer, BudgetPlanSerializer
+from .services import mark_schedule_on_create, mark_schedule_on_frequency_change, mark_schedule_on_disable
 
 try:
     SYSTEM_DEFAULTS = json.loads(os.getenv("SYSTEM_DEFAULT_EXPENSES", "{}"))
@@ -666,7 +667,9 @@ class ExpenseReportPreferenceListCreateAPIView(ExpenseBaseAPIView):
     def post(self, request):
         serializer = ExpenseReportPreferenceSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(user=request.user)
+        pref = serializer.save(user=request.user)
+        mark_schedule_on_create(pref)
+        pref.save(update_fields=["last_run_at", "next_run_at", "updated_at"])
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -678,10 +681,23 @@ class ExpenseReportPreferenceDetailAPIView(ExpenseBaseAPIView):
         report_pref = self._get_object(request, pk)
         if not report_pref:
             return Response({"message": "Report preference not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        old_frequency = report_pref.frequency
+        old_active = report_pref.is_active
+
         serializer = ExpenseReportPreferenceSerializer(report_pref, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data)
+        pref = serializer.save()
+
+        if pref.frequency != old_frequency:
+            mark_schedule_on_frequency_change(pref)
+        if old_active and not pref.is_active:
+            mark_schedule_on_disable(pref)
+        if (not old_active) and pref.is_active and pref.next_run_at is None:
+            mark_schedule_on_frequency_change(pref)
+
+        pref.save(update_fields=["next_run_at", "updated_at"])
+        return Response(ExpenseReportPreferenceSerializer(pref).data)
 
     def delete(self, request, pk):
         report_pref = self._get_object(request, pk)
@@ -689,13 +705,14 @@ class ExpenseReportPreferenceDetailAPIView(ExpenseBaseAPIView):
             return Response({"message": "Report preference not found"}, status=status.HTTP_404_NOT_FOUND)
         report_pref.is_deleted = True
         report_pref.is_active = False
-        report_pref.save(update_fields=["is_deleted", "is_active", "updated_at"])
+        mark_schedule_on_disable(report_pref)
+        report_pref.save(update_fields=["is_deleted", "is_active", "next_run_at", "updated_at"])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ExpenseReportDownloadAPIView(ExpenseBaseAPIView):
     def get(self, request):
-        format_type = request.query_params.get("format", "json").lower()
+        format_type = request.query_params.get("file_format", "json").lower()
         queryset = self._base_expense_queryset(request)
 
         if format_type == "csv":
