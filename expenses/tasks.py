@@ -10,6 +10,7 @@ from expenses.services import (
     calculate_next_run_at,
     period_bounds_for_frequency,
     report_as_json_bytes,
+    report_as_csv_bytes,
 )
 from sadhak_base.models import DomainEvent
 from sadhak_base.services import emit_event
@@ -83,7 +84,11 @@ def process_expense_report_event(self, event_id: str):
 
     try:
         payload = build_report_payload(preference.user, period_start, period_end)
-        attachment = report_as_json_bytes(payload)
+        report_format = (preference.report_format or "csv").lower()
+        if report_format == "json":
+            attachment = report_as_json_bytes(payload)
+        else:
+            attachment = report_as_csv_bytes(payload)
         recipient = preference.delivery_email or preference.user.email
 
         subject = f"Expense Report ({preference.frequency.title()})"
@@ -95,7 +100,7 @@ def process_expense_report_event(self, event_id: str):
             recipient_email=recipient,
             body_type="plain",
             attachment=attachment,
-            attachment_name=f"expense-report-{period_start}-to-{period_end}.json",
+            attachment_name=f"expense-report-{period_start}-to-{period_end}.{report_format}",
             is_unique_subject=False,
         )
 

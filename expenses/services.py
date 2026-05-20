@@ -1,6 +1,7 @@
 import json
 from datetime import timedelta
-
+from io import StringIO
+import csv
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -95,3 +96,21 @@ def build_report_payload(user, period_start, period_end):
 
 def report_as_json_bytes(payload):
     return json.dumps(payload, indent=2, default=str).encode("utf-8")
+
+def report_as_csv_bytes(payload):
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["spent_at", "amount", "main_category", "sub_category", "item", "source", "payment_method", "transaction_reference", "notes"])
+    for row in payload.get("results", []):
+        writer.writerow([
+            row.get("spent_at", ""),
+            row.get("amount", ""),
+            row.get("main_category", ""),
+            row.get("sub_category", ""),
+            row.get("item", ""),
+            row.get("source", ""),
+            row.get("payment_method", ""),
+            row.get("transaction_reference", ""),
+            row.get("notes", ""),
+        ])
+    return output.getvalue().encode("utf-8")
