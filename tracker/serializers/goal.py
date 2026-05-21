@@ -1,7 +1,7 @@
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
-
+from tracker.constants import GOAL_MILESTONE_ALLOWED_SECTIONS
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Goal
 from tracker.serializers.common import is_overdue, _get_occurrence_units
@@ -127,6 +127,14 @@ class GoalDetailSerializer(GoalListSerializer):
     def get_all_habits(self, obj):
         queryset = obj.habits.filter(is_deleted=False)
         return HabitListSerializer(queryset, many=True, context=self.context).data
+    
+    def validate_section(self, value):
+        if value not in GOAL_MILESTONE_ALLOWED_SECTIONS:
+            raise_tracker_error(
+                "GOAL_SECTION_NOT_ALLOWED",
+                "Goals are allowed only for career, health, and wealth sections.",
+            )
+        return value
 
     @transaction.atomic
     def create(self, validated_data):

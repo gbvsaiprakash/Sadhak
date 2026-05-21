@@ -361,8 +361,12 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         return data
 
     def validate(self, attrs):
-        self.validate_parent_assignment(attrs)
-        self.validate_active_parents(attrs)
+        if attrs["section"] == "personal":
+            attrs["goal"] = None
+            attrs["milestone"] = None
+        else:
+            self.validate_parent_assignment(attrs)
+            self.validate_active_parents(attrs)
         self._normalize_frequency_payload(attrs)
         self.validate_frequency(attrs, require_end_date=False)
         self._effective_duration_config(attrs)

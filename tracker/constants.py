@@ -2,7 +2,12 @@ SECTION_CHOICES = (
     ("career", "Career"),
     ("health", "Health"),
     ("wealth", "Wealth"),
+    ("personal", "Personal"),
 )
+
+# Goals and milestones are intentionally restricted to long-horizon domains.
+# "personal" is currently reserved for tasks/habits and diary-like flows.
+GOAL_MILESTONE_ALLOWED_SECTIONS = {"career", "health", "wealth"}
 
 GOAL_STATUS_CHOICES = (
     ("active", "Active"),
