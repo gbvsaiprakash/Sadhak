@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'user_management',
     'tracker',
     'sadhak_base',
+    'expenses',
 
 ]
 
@@ -266,6 +267,16 @@ CELERY_BEAT_SCHEDULE = {
     "process-pending-domain-events-every-minute": {
         "task": "sadhak_base.tasks.process_pending_domain_events",
         "schedule": crontab(minute="*"),
+        "kwargs": {"batch_size": 200},
+    },
+    "emit-due-expense-report-events-every-5-minutes": {
+        "task": "expenses.tasks.emit_due_expense_report_events_task",
+        "schedule": crontab(minute="*/5"),
+        "kwargs": {"batch_size": 200},
+    },
+    "process-pending-expense-report-events-every-5-minutes": {
+        "task": "expenses.tasks.process_pending_expense_report_events",
+        "schedule": crontab(minute="*/5"),
         "kwargs": {"batch_size": 200},
     },
 }

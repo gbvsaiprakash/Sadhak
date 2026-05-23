@@ -1,7 +1,7 @@
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
-
+from tracker.constants import GOAL_MILESTONE_ALLOWED_SECTIONS
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Milestone
 from tracker.serializers.common import is_overdue, _get_occurrence_units
@@ -65,6 +65,14 @@ class MilestoneDetailSerializer(MilestoneListSerializer):
             "updated_at",
         )
         read_only_fields = ("goal", "achieved_date", "created_at", "updated_at")
+    
+    def validate_section(self, value):
+        if value not in GOAL_MILESTONE_ALLOWED_SECTIONS:
+            raise_tracker_error(
+                "MILESTONE_SECTION_NOT_ALLOWED",
+                "Milestones are allowed only for career, health, and wealth sections.",
+            )
+        return value
 
     @transaction.atomic
     def create(self, validated_data):
