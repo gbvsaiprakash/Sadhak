@@ -14,6 +14,7 @@ class Notes(UUIDTimeStampedModel):
     is_pinned = models.BooleanField(default=False)
     description = models.TextField(blank=True, null=True)
     section = models.CharField(max_length=20, choices=SECTION_CHOICES, blank=True, null=True)
+    reminder_id = models.ForeignKey("tracker.habit", null=True, blank=True, on_delete=models.SET_NULL)
 
     class Meta:
         ordering = ("created_at",)
