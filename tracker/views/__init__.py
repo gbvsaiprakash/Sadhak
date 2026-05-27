@@ -9,6 +9,12 @@ from tracker.views.occurrence import (
     TaskOccurrenceListAPIView,
 )
 from tracker.views.calendar import CalendarCombinedAPIView, CalendarHabitAPIView, CalendarTaskAPIView
+from tracker.views.notes_and_diary import (
+    NotesAPIView,
+    NotesDetailAPIView,
+    NoteContentAPIView,
+    DiaryPageAPIView,
+)
 
 __all__ = [
     "GoalListAPIView",
@@ -40,4 +46,8 @@ __all__ = [
     "CalendarTaskAPIView",
     "CalendarHabitAPIView",
     "CalendarCombinedAPIView",
+    "NotesAPIView",
+    "NotesDetailAPIView",
+    "NoteContentAPIView",
+    "DiaryPageAPIView",
 ]

@@ -70,11 +70,6 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     conflict_override_reason = serializers.CharField(write_only=True, required=False, allow_blank=False)
     dependencies = DependencyItemSerializer(many=True, write_only=True, required=False)
     dependency_items = serializers.SerializerMethodField(read_only=True)
-    duration_value = serializers.IntegerField(write_only=True, required=False, min_value=1)
-    duration_unit = serializers.ChoiceField(write_only=True, required=False, choices=("minutes", "hours"))
-    duration = serializers.SerializerMethodField(read_only=True)
-
-
 
     SCHEDULE_FIELDS = {
         "frequency_type",
@@ -86,9 +81,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         "end_date",
         "start_time",
         "end_time",
-        "duration_value",
-        "duration_unit",
-        "duration",
+        "duration_config",
         "day_of_week",
         "day_of_month",
         "interval_hours",
@@ -114,9 +107,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             "frequency_period",
             "start_time",
             "end_time",
-            "duration_value",
-            "duration_unit",
-            "duration",
+            "duration_config",
             "day_of_week",
             "day_of_month",
             "interval_hours",
@@ -163,6 +154,9 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
 
         if v is not None and u is not None:
             attrs["duration_config"] = {"value": int(v), "unit": u}
+            return
+        
+        if attrs.get("duration_config") is not None:
             return
 
         if self.instance is not None and getattr(self.instance, "duration_config", None):
@@ -520,6 +514,8 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         if schedule_changed:
             from_date, to_date = self._get_schedule_window(old_instance, habit, validated_data)
             effective_from = max(timezone.localdate(), from_date)
+            if habit.end_date is None and habit.status == "active" and not habit.is_deleted:
+                to_date = max(to_date, timezone.localdate() + timedelta(days=90))
             # check_entity_schedule_conflicts(habit.user, habit, from_date=from_date, to_date=to_date)
             try:
                 check_entity_schedule_conflicts(

@@ -74,10 +74,6 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     skipped_occurrences = serializers.SerializerMethodField()
     dependencies = DependencyItemSerializer(many=True, write_only=True, required=False)
     dependency_items = serializers.SerializerMethodField(read_only=True)
-    duration_value = serializers.IntegerField(write_only=True, required=False, min_value=1)
-    duration_unit = serializers.ChoiceField(write_only=True, required=False, choices=("minutes", "hours"))
-    duration = serializers.SerializerMethodField(read_only=True)
-
 
     SCHEDULE_FIELDS = {
         "frequency_type",
@@ -89,9 +85,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         "end_date",
         "start_time",
         "end_time",
-        "duration_value",
-        "duration_unit",
-        "duration",
+        "duration_config",
         "day_of_week",
         "day_of_month",
         "interval_hours",
@@ -119,9 +113,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             "end_date",
             "start_time",
             "end_time",
-            "duration_value",
-            "duration_unit",
-            "duration",
+            "duration_config",
             "day_of_week",
             "day_of_month",
             "interval_hours",
@@ -166,8 +158,12 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
         if v is not None and u is not None:
             attrs["duration_config"] = {"value": int(v), "unit": u}
             return
+        
+        if attrs.get("duration_config") is not None:
+            return
 
         if self.instance is not None and getattr(self.instance, "duration_config", None):
+            print("existing duration config", self.instance.duration_config)
             attrs["duration_config"] = self.instance.duration_config
         else:
             attrs["duration_config"] = {"value": 30, "unit": "minutes"}

@@ -38,7 +38,7 @@ def _entity_duration(entity):
     """
     start = datetime.combine(timezone.localdate(), entity.start_time)
     end = datetime.combine(timezone.localdate(), entity.end_time or entity.start_time)
-    return max(end - start, timedelta(minutes=0))
+    return max(end - start, timedelta(minutes=0), entity.duration_config and timedelta(minutes=_duration_minutes(entity)) or timedelta(minutes=0))
 
 
 def _add_duration(start_t, duration):

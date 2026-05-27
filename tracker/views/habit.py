@@ -1,7 +1,7 @@
 from django.utils import timezone
 from rest_framework import request, status
 from rest_framework.response import Response
-
+from datetime import timedelta
 from tracker.models import Habit, TaskOccurrence, OccurrenceReminder
 from tracker.serializers import HabitDetailSerializer, HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, generate_occurrences, mark_occurrence
@@ -42,6 +42,36 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
             check_milestone_completion(habit.milestone)
         if habit.goal:
             check_goal_completion(habit.goal)
+    
+    def _ensure_future_occurrences(self, habit):
+        if habit.is_deleted or habit.status != "active" or habit.end_date is not None:
+            return
+
+        today = timezone.localdate()
+        horizon_end = today + timedelta(days=90)
+
+        has_upcoming_pending = TaskOccurrence.objects.filter(
+            habit_id=habit.id,
+            is_deleted=False,
+            status="pending",
+            scheduled_date__gte=today,
+        )
+
+        last_scheduled = has_upcoming_pending.order_by("-scheduled_date").values_list("scheduled_date", flat=True).first()
+        
+        if not last_scheduled:
+            generate_occurrences(
+                habit,
+                from_date=today,
+                to_date=horizon_end,
+            )
+        
+        if last_scheduled and last_scheduled < horizon_end:
+            generate_occurrences(
+                habit,
+                from_date=last_scheduled + timedelta(days=1),
+                to_date=horizon_end,
+            )
 
 class HabitDependencyCandidatesAPIView(HabitBaseAPIView):
     def get(self, request, pk):
@@ -63,6 +93,9 @@ class HabitListAPIView(HabitBaseAPIView):
         return self.list_serializer_class
 
     def get(self, request):
+        habits = list(self.get_queryset())
+        for h in habits:
+            self._ensure_future_occurrences(h)
         serializer = self.get_serializer(self.get_queryset(), many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -79,6 +112,7 @@ class HabitDetailAPIView(HabitBaseAPIView):
 
     def get(self, request, pk):
         habit = self.get_habit(pk)
+        self._ensure_future_occurrences(habit)
         return Response(self.get_serializer(habit).data, status=status.HTTP_200_OK)
 
     def put(self, request, pk):

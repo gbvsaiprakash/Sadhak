@@ -62,3 +62,8 @@ ACTIVE_GOAL_STATUSES = {"active"}
 ACTIVE_TASK_STATUSES = {"pending", "in_progress"}
 ACTIVE_HABIT_STATUSES = {"active", "paused"}
 RESOLVED_OCCURRENCE_STATUSES = {"completed", "skipped"}
+
+NOTES_CHOICES = (
+    ("notes", "Notes"),
+    ("diary", "Diary"),
+)
