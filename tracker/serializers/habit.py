@@ -514,6 +514,8 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
         if schedule_changed:
             from_date, to_date = self._get_schedule_window(old_instance, habit, validated_data)
             effective_from = max(timezone.localdate(), from_date)
+            if habit.end_date is None and habit.status == "active" and not habit.is_deleted:
+                to_date = max(to_date, timezone.localdate() + timedelta(days=90))
             # check_entity_schedule_conflicts(habit.user, habit, from_date=from_date, to_date=to_date)
             try:
                 check_entity_schedule_conflicts(
