@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'tracker',
     'sadhak_base',
     'expenses',
+    'integrations',
 
 ]
 

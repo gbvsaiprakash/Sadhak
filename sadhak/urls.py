@@ -46,4 +46,5 @@ urlpatterns = [
     path("api/", include("sadhak_base.notification_urls")),
     path("api/expenses/", include("expenses.urls")),
     path("api/notes/", include("tracker.notes_and_diary_urls")),
+    path("api/integrations/", include("integrations.urls")),
 ]
