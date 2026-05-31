@@ -8,7 +8,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-
+from django.shortcuts import redirect
 from integrations.models import GoogleAuthConnection, GoogleCalendarConnection
 from integrations.crypto import encrypt_token
 from integrations.serializers import (
@@ -164,7 +164,8 @@ class GoogleOAuthCallbackAPIView(APIView):
                 # Watch creation can fail if webhook URL is not configured;
                 # connection should still succeed.
                 pass
-            return Response({"message": "Google Calendar connected", "email": email}, status=status.HTTP_200_OK)
+            # return Response({"message": "Google Calendar connected", "email": email}, status=status.HTTP_200_OK)
+            return redirect(os.getenv("frontend_url") + "/integrations/google/oauth/callback")
 
         # mode=auth -> app login/register via Google
         user.token_version += 1
