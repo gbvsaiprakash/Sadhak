@@ -4,12 +4,16 @@ import secrets
 import urllib.parse
 import urllib.request
 import urllib.error
+import logging
 from datetime import datetime, timezone, timedelta
 
 from django.core.cache import cache
 from django.utils import timezone as dj_timezone
 from integrations.crypto import encrypt_token, decrypt_token
 from integrations.models import GoogleCalendarConnection, GoogleCalendarMirrorEvent, GoogleCalendarWatch, EventSyncMap
+from integrations.rrule_handler import RRuleHandler
+
+logger = logging.getLogger(__name__)
 
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -243,6 +247,37 @@ def upsert_mirror_events(user, calendar_id: str, items: list[dict]) -> int:
     return changed
 
 
+def _map_app_status_to_google(app_status: str) -> tuple[str, dict]:
+    """
+    Map app occurrence status to Google Calendar event status.
+    Returns (google_status, extended_properties)
+    
+    App statuses: pending, completed, skipped, missed
+    Google statuses: confirmed, cancelled
+    """
+    status_map = {
+        "pending": ("confirmed", {}),
+        "completed": ("confirmed", {"app_status": "completed"}),
+        "skipped": ("cancelled", {}),
+        "missed": ("cancelled", {"app_status": "missed"}),
+    }
+    return status_map.get(app_status, ("confirmed", {}))
+
+
+def _map_google_status_to_app(google_status: str, extended_props: dict) -> str:
+    """
+    Map Google Calendar event status back to app occurrence status.
+    Uses both google_status and stored app_status in extendedProperties.
+    """
+    app_status = extended_props.get("app_status")
+    
+    if google_status == "cancelled":
+        return app_status if app_status in ["missed", "skipped"] else "skipped"
+    
+    # google_status == "confirmed"
+    return app_status if app_status == "completed" else "pending"
+
+
 def pull_google_delta_for_watch(watch: GoogleCalendarWatch) -> dict:
     connection = GoogleCalendarConnection.objects.filter(user=watch.user, is_active=True).first()
     if not connection:
@@ -251,18 +286,178 @@ def pull_google_delta_for_watch(watch: GoogleCalendarWatch) -> dict:
     data = google_list_events(access_token, calendar_id=watch.calendar_id, sync_token=watch.sync_token)
     items = data.get("items", [])
     changed = upsert_mirror_events(watch.user, watch.calendar_id, items)
+    
+    # Sync status changes from Google to app occurrences
+    status_synced = sync_google_status_to_app_occurrences(watch.user, watch.calendar_id, items)
+    
     next_sync_token = data.get("nextSyncToken")
     if next_sync_token:
         watch.sync_token = next_sync_token
         watch.save(update_fields=["sync_token", "updated_at"])
-    return {"changed": changed, "next_sync_token": next_sync_token}
+    return {"changed": changed, "status_synced": status_synced, "next_sync_token": next_sync_token}
+
+
+def sync_google_status_to_app_occurrences(user, calendar_id: str, google_items: list[dict]) -> int:
+    """
+    Sync status changes from Google Calendar events to app occurrences.
+    Used by pull_google_delta_for_watch to update occurrence statuses.
+    """
+    from tracker.models import TaskOccurrence
+    
+    synced_count = 0
+    for item in google_items:
+        google_event_id = item.get("id")
+        if not google_event_id:
+            continue
+        
+        # Find mapping between Google event and app occurrence
+        mapping = EventSyncMap.objects.filter(
+            user=user,
+            calendar_id=calendar_id,
+            google_event_id=google_event_id,
+            is_deleted=False,
+        ).first()
+        
+        if not mapping:
+            continue
+        
+        try:
+            occurrence = TaskOccurrence.objects.get(id=mapping.local_occurrence_id)
+        except TaskOccurrence.DoesNotExist:
+            continue
+        
+        # Map Google status to app status
+        google_status = item.get("status", "confirmed")
+        extended_props = item.get("extendedProperties", {}).get("private", {})
+        new_app_status = _map_google_status_to_app(google_status, extended_props)
+        
+        # Only update if status has changed
+        if occurrence.status != new_app_status:
+            occurrence.status = new_app_status
+            occurrence.save(update_fields=["status", "updated_at"])
+            synced_count += 1
+            
+            # Update mapping timestamps
+            mapping.last_google_updated_at = dj_timezone.now()
+            mapping.etag = item.get("etag")
+            mapping.save(update_fields=["last_google_updated_at", "etag", "updated_at"])
+    
+    return synced_count
+
+
+def create_recurring_google_event(user, task, calendar_id: str = "primary") -> dict:
+    """
+    Create a recurring event in Google Calendar from a Task with recurrence_rule.
+    
+    Args:
+        user: User object
+        task: Task object with recurrence_rule set
+        calendar_id: Google Calendar ID (default "primary")
+    
+    Returns:
+        dict with keys: created, google_event_id, error (if any)
+    """
+    if not task.recurrence_rule:
+        return {"created": False, "error": "Task has no recurrence_rule"}
+    
+    connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
+    if not connection:
+        return {"created": False, "error": "Google Calendar not connected"}
+    
+    try:
+        access_token = ensure_valid_access_token(connection)
+        
+        # Prepare event payload with recurrence
+        tz = "UTC"
+        date_str = task.start_date.isoformat()
+        start_time = task.start_time.isoformat() if task.start_time else "00:00:00"
+        end_time = task.end_time.isoformat() if task.end_time else start_time
+        start_iso = f"{date_str}T{start_time}+00:00"
+        end_iso = f"{date_str}T{end_time}+00:00"
+        
+        # Convert RRULE to Google's recurrence format (list with "RRULE:" prefix)
+        google_recurrence = RRuleHandler.rrule_to_google_event_recurrence(task.recurrence_rule)
+        
+        # Map task status (use pending for new task)
+        google_status, extended_props = _map_app_status_to_google("pending")
+        
+        payload = {
+            "summary": task.title,
+            "description": task.description or "",
+            "start": {"dateTime": start_iso, "timeZone": tz},
+            "end": {"dateTime": end_iso, "timeZone": tz},
+            "recurrence": google_recurrence,  # List of RRULE strings
+            "status": google_status,
+            "extendedProperties": {"private": extended_props},
+        }
+        
+        # Create event in Google Calendar
+        encoded_calendar = urllib.parse.quote(calendar_id, safe="")
+        insert_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events"
+        res = _google_request_json("POST", insert_url, access_token, payload)
+        google_event_id = res.get("id", "")
+        
+        if not google_event_id:
+            return {"created": False, "error": "Google Calendar did not return event ID"}
+        
+        # Update Task with google_event_id
+        task.google_event_id = google_event_id
+        task.save(update_fields=["google_event_id", "updated_at"])
+        
+        # Create EventSyncMap for the recurring root event
+        EventSyncMap.objects.update_or_create(
+            user=user,
+            local_task_id=task.id,
+            google_event_id=google_event_id,
+            defaults={
+                "local_occurrence_id": task.id,  # Use task ID as occurrence ID for root
+                "local_parent_type": "task",
+                "calendar_id": calendar_id,
+                "etag": res.get("etag"),
+                "is_recurring": True,
+                "recurrence_rule": task.recurrence_rule,
+                "google_etag": res.get("etag"),
+                "last_local_updated_at": dj_timezone.now(),
+                "last_google_updated_at": dj_timezone.now(),
+                "is_deleted": False,
+            },
+        )
+        
+        logger.info(
+            f"Created recurring Google Calendar event {google_event_id} for task {task.id} "
+            f"(user {user.username}) with RRULE: {task.recurrence_rule}"
+        )
+        
+        return {"created": True, "google_event_id": google_event_id}
+    
+    except Exception as e:
+        logger.error(f"Error creating recurring Google event for task {task.id}: {str(e)}", exc_info=True)
+        return {"created": False, "error": str(e)}
 
 
 def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str = "primary") -> dict:
     """
     Helper to be called from tracker flows.
     action: create|update|delete
+    Includes bidirectional status sync using Google extendedProperties.
+    
+    For recurring tasks: syncs the root recurring event in Google Calendar.
+    Individual occurrences of recurring tasks are not synced individually
+    (they're generated by Google Calendar's recurrence rule).
     """
+    # Check if this occurrence is part of a recurring task
+    if occurrence.task_id:
+        task = occurrence.task
+        if task and task.recurrence_rule:
+            # This is a recurring task - only sync if this is a modification of an individual occurrence
+            # For now, in Phase 2 Step 3, we skip individual occurrences of recurring tasks
+            # (they will be handled in Phase 2 Step 5)
+            logger.info(
+                f"Skipping individual occurrence {occurrence.id} sync - "
+                f"covered by recurring task {task.id} with RRULE"
+            )
+            return {"pushed": False, "reason": "recurring_task", "note": "occurrences covered by recurring series"}
+    
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
     if not connection:
         return {"pushed": False, "reason": "not_connected"}
@@ -274,12 +469,19 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
     end_time = occurrence.schedule_end_time.isoformat() if occurrence.schedule_end_time else start_time
     start_iso = f"{date_str}T{start_time}+00:00"
     end_iso = f"{date_str}T{end_time}+00:00"
+    
+    # Map occurrence status to Google status
+    google_status, extended_props = _map_app_status_to_google(occurrence.status)
+    
     payload = {
         "summary": title,
         "description": occurrence.notes or "",
         "start": {"dateTime": start_iso, "timeZone": tz},
         "end": {"dateTime": end_iso, "timeZone": tz},
+        "status": google_status,
+        "extendedProperties": {"private": extended_props},
     }
+    
     mapping = EventSyncMap.objects.filter(user=user, local_occurrence_id=occurrence.id).first()
     encoded_calendar = urllib.parse.quote(calendar_id, safe="")
 

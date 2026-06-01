@@ -8,6 +8,7 @@ from integrations.views import (
     GoogleCalendarFullSyncAPIView,
     GoogleCalendarWebhookAPIView,
     GoogleCalendarMirrorEventsAPIView,
+    GoogleCalendarDebugStatusAPIView,
 )
 
 
@@ -19,4 +20,5 @@ urlpatterns = [
     path("google/calendar/sync/full/", GoogleCalendarFullSyncAPIView.as_view(), name="google-calendar-full-sync"),
     path("google/calendar/events/", GoogleCalendarMirrorEventsAPIView.as_view(), name="google-calendar-events"),
     path("google/calendar/webhook/", GoogleCalendarWebhookAPIView.as_view(), name="google-calendar-webhook"),
+    path("google/calendar/debug/", GoogleCalendarDebugStatusAPIView.as_view(), name="google-calendar-debug"),
 ]

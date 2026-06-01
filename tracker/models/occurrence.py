@@ -24,6 +24,24 @@ class TaskOccurrence(UUIDTimeStampedModel):
     context_title = models.CharField(max_length=255, blank=True, null=True)
     context_description = models.TextField(blank=True, null=True)
     context_checklist = models.JSONField(default=list, blank=True)
+    
+    # Google Calendar sync fields
+    google_event_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Google Calendar event ID for this occurrence"
+    )
+    google_recurrence_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="YYYYMMDDTHHMMSS format - identifies which instance of series"
+    )
+    synced_from_google = models.BooleanField(
+        default=False,
+        help_text="True if created from Google Calendar event"
+    )
 
     class Meta:
         ordering = ("scheduled_date", "scheduled_time", "created_at")

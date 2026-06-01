@@ -64,12 +64,35 @@ class EventSyncMap(UUIDTimeStampedModel):
         max_length=10,
         choices=(("task", "Task"), ("habit", "Habit")),
     )
+    local_task_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Task UUID for recurring root events"
+    )
     google_event_id = models.CharField(max_length=255, db_index=True)
     calendar_id = models.CharField(max_length=255, default="primary")
     etag = models.CharField(max_length=255, blank=True, null=True)
     last_local_updated_at = models.DateTimeField(blank=True, null=True)
     last_google_updated_at = models.DateTimeField(blank=True, null=True)
     is_deleted = models.BooleanField(default=False)
+    
+    # Recurring event fields
+    is_recurring = models.BooleanField(
+        default=False,
+        help_text="True if this maps to root event of recurring series"
+    )
+    recurrence_rule = models.TextField(
+        null=True,
+        blank=True,
+        help_text="RRULE copy for verification"
+    )
+    google_etag = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Google's version tag for conflict detection"
+    )
 
     class Meta:
         constraints = [

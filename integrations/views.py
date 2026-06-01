@@ -28,6 +28,7 @@ from integrations.services import (
     upsert_mirror_events,
     pull_google_delta_for_watch,
     ensure_valid_access_token,
+    sync_google_status_to_app_occurrences,
 )
 from user_management.models import User
 from user_management.views import AuthenticatedAPIView
@@ -214,6 +215,10 @@ class GoogleCalendarDisconnectAPIView(AuthenticatedAPIView):
 
 
 class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
+    """
+    Full sync of Google Calendar events with bidirectional status sync.
+    Fetches all events from Google Calendar and syncs status changes.
+    """
     def post(self, request):
         s = GoogleCalendarSyncSerializer(data=request.data or {})
         s.is_valid(raise_exception=True)
@@ -231,16 +236,21 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
         data = google_list_events(access_token, calendar_id=calendar_id)
         items = data.get("items", [])
         changed = upsert_mirror_events(request.user, calendar_id, items)
+        
+        # Sync status changes from Google to app occurrences
+        status_synced = sync_google_status_to_app_occurrences(request.user, calendar_id, items)
+        
         next_sync_token = data.get("nextSyncToken")
         if next_sync_token:
             watch.sync_token = next_sync_token
             watch.save(update_fields=["sync_token", "updated_at"])
-
+        print(f"Full sync: fetched {len(items)} events, upserted {changed} events, synced {status_synced} statuses for user {request.user.user_id}")
         return Response(
             {
                 "message": "Full sync fetched successfully",
                 "fetched_events": len(items),
                 "upserted_events": changed,
+                "status_synced": status_synced,
                 "next_sync_token": next_sync_token,
             },
             status=status.HTTP_200_OK,
@@ -248,6 +258,10 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
 
 
 class GoogleCalendarWebhookAPIView(APIView):
+    """
+    Webhook handler for Google Calendar push notifications.
+    Syncs both event data and status changes bidirectionally.
+    """
     permission_classes = []
     authentication_classes = []
 
@@ -267,8 +281,19 @@ class GoogleCalendarWebhookAPIView(APIView):
         if not watch:
             return Response({"message": "Watch not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        result = pull_google_delta_for_watch(watch)
-        return Response({"ok": True, **result}, status=status.HTTP_200_OK)
+        try:
+            result = pull_google_delta_for_watch(watch)
+            return Response({
+                "ok": True,
+                "changed": result.get("changed", 0),
+                "status_synced": result.get("status_synced", 0),
+                "next_sync_token": result.get("next_sync_token"),
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({
+                "ok": False,
+                "error": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class GoogleCalendarMirrorEventsAPIView(AuthenticatedAPIView):
@@ -280,3 +305,54 @@ class GoogleCalendarMirrorEventsAPIView(AuthenticatedAPIView):
         ).order_by("start_at")
         data = GoogleCalendarMirrorEventSerializer(qs, many=True).data
         return Response({"events": data}, status=status.HTTP_200_OK)
+
+
+class GoogleCalendarDebugStatusAPIView(AuthenticatedAPIView):
+    """
+    Debug endpoint: Check sync status for the authenticated user.
+    Returns detailed info about connection, watches, and synced occurrences.
+    """
+    def get(self, request):
+        from integrations.models import EventSyncMap
+        from tracker.models import TaskOccurrence
+        from datetime import date
+
+        user = request.user
+        
+        # Check connection
+        connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
+        connected = bool(connection)
+        
+        # Check watches
+        watches = user.google_calendar_watches.filter(is_active=True)
+        watch_count = watches.count()
+        
+        # Check synced occurrences
+        synced_maps = EventSyncMap.objects.filter(user=user, is_deleted=False).count()
+        
+        # Check pending occurrences (future dates, not synced)
+        pending_occs = TaskOccurrence.objects.filter(
+            task__user=user,
+            scheduled_date__gte=date.today(),
+            is_deleted=False
+        ).exclude(id__in=EventSyncMap.objects.filter(user=user).values_list('local_occurrence_id', flat=True))
+        pending_count = pending_occs.count()
+
+        return Response({
+            "debug": {
+                "user": user.username,
+                "google_calendar_connected": connected,
+                "connection_email": connection.email if connection else None,
+                "watches_active": watch_count,
+                "occurrences_synced": synced_maps,
+                "pending_occurrences": pending_count,
+                "pending_sample": [
+                    {
+                        "id": str(occ.id),
+                        "title": occ.task.title if occ.task else occ.habit.title,
+                        "date": str(occ.scheduled_date),
+                    }
+                    for occ in pending_occs[:5]
+                ] if pending_count > 0 else []
+            }
+        }, status=status.HTTP_200_OK)
