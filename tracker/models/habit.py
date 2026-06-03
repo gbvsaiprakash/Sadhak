@@ -37,6 +37,22 @@ class Habit(UUIDTimeStampedModel):
     reminder_enabled = models.BooleanField(default=False)
     reminder_mode_all = models.BooleanField(blank=True, null=True)
     reminder_offset = models.JSONField(default=list, blank=True)
+    google_event_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Google Calendar root event ID for recurring habits"
+    )
+    recurrence_rule = models.TextField(
+        null=True,
+        blank=True,
+        help_text="RRULE format: FREQ=DAILY;UNTIL=20260630;INTERVAL=1"
+    )
+    external_google_id = models.BooleanField(
+        default=False,
+        help_text="True if created in Google Calendar and synced to app"
+    )
 
     class Meta:
         ordering = ("start_date", "start_time", "created_at")

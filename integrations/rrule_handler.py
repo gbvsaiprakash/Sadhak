@@ -14,6 +14,17 @@ from dateutil.rrule import rrulestr
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_until_for_expansion(rrule_str: str) -> str:
+    parts = []
+    for part in rrule_str.split(";"):
+        if part.startswith("UNTIL="):
+            value = part.split("=", 1)[1]
+            if len(value) == 8:
+                part = f"UNTIL={value}T235959"
+        parts.append(part)
+    return ";".join(parts)
+
 # Mapping app frequency types to dateutil.rrule constants
 FREQ_MAP = {
     "daily": DAILY,
@@ -201,12 +212,13 @@ class RRuleHandler:
         """
         try:
             # Parse the RRULE and get all components
-            full_rrule_str = rrule_str
+            normalized_rrule_str = _normalize_until_for_expansion(rrule_str)
+            full_rrule_str = normalized_rrule_str
             
             # If start_date is not in the RRULE, prepend it
             if "DTSTART" not in full_rrule_str:
                 # The rrulestr function needs DTSTART
-                full_rrule_str = f"DTSTART:{start_date.strftime('%Y%m%dT%H%M%S')}\n{rrule_str}"
+                full_rrule_str = f"DTSTART:{start_date.strftime('%Y%m%dT%H%M%S')}\nRRULE:{normalized_rrule_str}"
             
             # Use dateutil.rrule to generate occurrences
             rule = rrulestr(full_rrule_str, dtstart=start_date)
@@ -214,7 +226,7 @@ class RRuleHandler:
             # Determine default end_date based on RRULE frequency
             if end_date is None:
                 # Default to a wide range to catch yearly/monthly/weekly recurring
-                if "FREQ=YEARLY" in rrule_str:
+                if "FREQ=YEARLY" in normalized_rrule_str:
                     end_date = start_date + timedelta(days=3*365)  # 3 years
                 else:
                     end_date = start_date + timedelta(days=365)  # 1 year

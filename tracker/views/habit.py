@@ -7,6 +7,7 @@ from tracker.serializers import HabitDetailSerializer, HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, generate_occurrences, mark_occurrence
 from tracker.views.mixins import TrackerAPIViewMixin
 from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
+from integrations.services import delete_habit_occurrence_in_app
 
 
 class HabitBaseAPIView(TrackerAPIViewMixin):
@@ -176,6 +177,16 @@ class HabitLogAPIView(HabitBaseAPIView):
         occurrence = TaskOccurrence.objects.filter(habit=habit, id=request.data.get("occurrence_id")).first()
         if occurrence is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit occurrence was not found.")
+        if habit.recurrence_rule and request.data.get("delete_all_future") is not None:
+            delete_habit_occurrence_in_app(
+                occurrence,
+                delete_all_future=bool(request.data.get("delete_all_future")),
+            )
+            if habit.milestone:
+                check_milestone_completion(habit.milestone)
+            if habit.goal:
+                check_goal_completion(habit.goal)
+            return Response(self.detail_serializer_class(habit, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
         status_value = request.data.get("status", "completed")
         override_dependency = bool(request.data.get("override_dependency", False))
         override_reason = request.data.get("override_reason")

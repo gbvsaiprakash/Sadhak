@@ -9,9 +9,15 @@ from datetime import datetime, date
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from unittest.mock import patch, MagicMock
-from integrations.services import create_recurring_google_event
+from integrations.services import (
+    create_recurring_google_event,
+    sync_google_recurring_to_app,
+    sync_google_recurring_change,
+    delete_task_occurrence_in_app,
+    _update_rrule_until_date,
+)
 from integrations.models import EventSyncMap, GoogleCalendarConnection
-from tracker.models import Task
+from tracker.models import Task, TaskOccurrence, Habit
 from integrations.rrule_handler import RRuleHandler
 
 logger = logging.getLogger(__name__)
@@ -237,6 +243,243 @@ class EventSyncMapRecurringTests(TestCase):
         self.assertEqual(mapping.google_etag, "etag_123")
         self.assertEqual(mapping.local_task_id, task_id)
         logger.info(f"EventSyncMap created for recurring task: {mapping.id}")
+
+
+class GoogleRecurringPullTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            username="googlepull",
+            email="googlepull@example.com",
+        )
+
+    def test_sync_google_recurring_to_app_creates_task_and_occurrences(self):
+        result = sync_google_recurring_to_app(
+            self.user,
+            {
+                "id": "google_series_123",
+                "etag": "etag_series_123",
+                "summary": "Daily Reflection",
+                "description": "Imported from Google",
+                "start": {"dateTime": "2026-06-05T09:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-05T09:30:00Z", "timeZone": "UTC"},
+                "recurrence": ["RRULE:FREQ=DAILY;INTERVAL=1;UNTIL=20260607"],
+            },
+            max_occurrences=10,
+        )
+
+        self.assertTrue(result["synced"])
+        self.assertTrue(result["task_created"])
+        self.assertEqual(result["occurrences_total"], 3)
+
+        task = Task.objects.get(google_event_id="google_series_123")
+        self.assertEqual(task.frequency_type, "daily")
+        self.assertEqual(task.recurrence_rule, "FREQ=DAILY;INTERVAL=1;UNTIL=20260607")
+
+        occurrences = TaskOccurrence.objects.filter(task=task).order_by("scheduled_date")
+        self.assertEqual(occurrences.count(), 3)
+        self.assertEqual(occurrences.first().google_recurrence_id, "20260605T090000Z")
+
+        mapping = EventSyncMap.objects.get(user=self.user, google_event_id="google_series_123")
+        self.assertTrue(mapping.is_recurring)
+        self.assertEqual(mapping.local_task_id, task.id)
+
+    def test_sync_google_recurring_to_app_updates_existing_task(self):
+        task = Task.objects.create(
+            user=self.user,
+            title="Old Title",
+            section="personal",
+            status="pending",
+            frequency_type="daily",
+            start_date=date(2026, 6, 5),
+            end_date=date(2026, 6, 7),
+            start_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260607",
+            google_event_id="google_series_456",
+            external_google_id=True,
+        )
+
+        result = sync_google_recurring_to_app(
+            self.user,
+            {
+                "id": "google_series_456",
+                "etag": "etag_series_456",
+                "summary": "Updated Title",
+                "description": "Now updated",
+                "start": {"dateTime": "2026-06-05T09:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-05T10:00:00Z", "timeZone": "UTC"},
+                "recurrence": ["RRULE:FREQ=DAILY;INTERVAL=2;UNTIL=20260609"],
+            },
+            max_occurrences=10,
+        )
+
+        self.assertTrue(result["synced"])
+        self.assertFalse(result["task_created"])
+
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Updated Title")
+        self.assertEqual(task.frequency_interval, 2)
+        self.assertEqual(task.recurrence_rule, "FREQ=DAILY;INTERVAL=2;UNTIL=20260609")
+        self.assertEqual(TaskOccurrence.objects.filter(task=task).count(), 3)
+
+
+class GoogleRecurringModificationTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            username="googlemodify",
+            email="googlemodify@example.com",
+        )
+
+    def test_update_rrule_until_date_replaces_until(self):
+        updated = _update_rrule_until_date("FREQ=DAILY;INTERVAL=2;UNTIL=20260609", date(2026, 6, 7))
+        self.assertEqual(updated, "FREQ=DAILY;INTERVAL=2;UNTIL=20260607")
+
+    def test_sync_google_recurring_change_updates_single_exception(self):
+        task = Task.objects.create(
+            user=self.user,
+            title="Daily Task",
+            section="personal",
+            status="pending",
+            frequency_type="daily",
+            start_date=date(2026, 6, 5),
+            end_date=date(2026, 6, 10),
+            start_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260610",
+            google_event_id="root_series_1",
+            external_google_id=True,
+        )
+        occurrence = TaskOccurrence.objects.create(
+            task=task,
+            scheduled_date=date(2026, 6, 6),
+            scheduled_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+            status="pending",
+            google_recurrence_id="20260606T090000Z",
+        )
+
+        result = sync_google_recurring_change(
+            self.user,
+            {
+                "id": "instance_1",
+                "recurringEventId": "root_series_1",
+                "status": "confirmed",
+                "etag": "etag_instance_1",
+                "originalStartTime": {"dateTime": "2026-06-06T09:00:00Z"},
+                "extendedProperties": {"private": {"app_status": "completed"}},
+            },
+        )
+
+        self.assertTrue(result["synced"])
+        occurrence.refresh_from_db()
+        self.assertEqual(occurrence.status, "completed")
+        self.assertEqual(occurrence.google_event_id, "instance_1")
+
+    @patch("integrations.services.create_recurring_google_event")
+    def test_delete_task_occurrence_in_app_for_future_updates_rrule(self, mock_create):
+        mock_create.return_value = {"created": True, "action": "update", "google_event_id": "root_series_2"}
+        task = Task.objects.create(
+            user=self.user,
+            title="Daily Task",
+            section="personal",
+            status="pending",
+            frequency_type="daily",
+            start_date=date(2026, 6, 5),
+            end_date=date(2026, 6, 10),
+            start_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260610",
+            google_event_id="root_series_2",
+        )
+        occ1 = TaskOccurrence.objects.create(task=task, scheduled_date=date(2026, 6, 6), scheduled_time=datetime.strptime("09:00:00", "%H:%M:%S").time(), status="pending")
+        occ2 = TaskOccurrence.objects.create(task=task, scheduled_date=date(2026, 6, 7), scheduled_time=datetime.strptime("09:00:00", "%H:%M:%S").time(), status="pending")
+
+        result = delete_task_occurrence_in_app(occ1, delete_all_future=True)
+
+        self.assertTrue(result["deleted"])
+        task.refresh_from_db()
+        occ1.refresh_from_db()
+        occ2.refresh_from_db()
+        self.assertEqual(task.recurrence_rule, "FREQ=DAILY;INTERVAL=1;UNTIL=20260605")
+        self.assertEqual(occ1.status, "skipped")
+        self.assertEqual(occ2.status, "skipped")
+        self.assertTrue(mock_create.called)
+
+
+class HabitRecurringSyncTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create(
+            username="habitsync",
+            email="habitsync@example.com",
+        )
+        self.connection = GoogleCalendarConnection.objects.create(
+            user=self.user,
+            email="habitsync@gmail.com",
+            google_sub="google_habit_123",
+            refresh_token="encrypted_refresh_token",
+            access_token="encrypted_access_token",
+            token_expiry=datetime.now(),
+            scope="calendar",
+            is_active=True,
+        )
+
+    @patch('integrations.services._google_request_json')
+    @patch('integrations.services.ensure_valid_access_token')
+    def test_create_recurring_google_event_for_habit(self, mock_token, mock_request):
+        mock_token.return_value = "access_token"
+        mock_request.return_value = {"id": "habit_google_event_1", "etag": "habit_etag_1"}
+
+        habit = Habit.objects.create(
+            user=self.user,
+            title="Morning Walk",
+            section="personal",
+            status="active",
+            frequency_type="daily",
+            frequency_interval=1,
+            start_date=date(2026, 6, 5),
+            end_date=date(2026, 6, 10),
+            start_time=datetime.strptime("06:00:00", "%H:%M:%S").time(),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260610",
+        )
+
+        result = create_recurring_google_event(self.user, habit)
+
+        self.assertTrue(result["created"])
+        self.assertEqual(result["parent_type"], "habit")
+        payload = mock_request.call_args[0][3]
+        self.assertEqual(payload["extendedProperties"]["private"]["app_type"], "habit")
+
+    def test_sync_google_recurring_to_app_updates_existing_habit(self):
+        habit = Habit.objects.create(
+            user=self.user,
+            title="Old Habit",
+            section="personal",
+            status="active",
+            frequency_type="daily",
+            start_date=date(2026, 6, 5),
+            end_date=date(2026, 6, 7),
+            start_time=datetime.strptime("06:00:00", "%H:%M:%S").time(),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260607",
+            google_event_id="habit_series_456",
+            external_google_id=True,
+        )
+
+        result = sync_google_recurring_to_app(
+            self.user,
+            {
+                "id": "habit_series_456",
+                "etag": "etag_habit_series_456",
+                "summary": "Updated Habit",
+                "description": "Habit from Google",
+                "start": {"dateTime": "2026-06-05T06:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-05T06:30:00Z", "timeZone": "UTC"},
+                "recurrence": ["RRULE:FREQ=DAILY;INTERVAL=1;UNTIL=20260607"],
+                "extendedProperties": {"private": {"app_type": "habit", "app_id": str(habit.id)}},
+            },
+            max_occurrences=10,
+        )
+
+        self.assertTrue(result["synced"])
+        self.assertEqual(result["parent_type"], "habit")
+        habit.refresh_from_db()
+        self.assertEqual(habit.title, "Updated Habit")
+        self.assertEqual(TaskOccurrence.objects.filter(habit=habit).count(), 3)
     
     def test_distinguish_recurring_from_single(self):
         """Test that we can distinguish recurring events from single events."""

@@ -2,7 +2,7 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 import logging
 
-from tracker.models import TaskOccurrence, Task
+from tracker.models import TaskOccurrence, Task, Habit
 from integrations.services import push_local_occurrence_change, create_recurring_google_event
 
 logger = logging.getLogger(__name__)
@@ -16,6 +16,10 @@ def sync_recurring_task_to_google(sender, instance: Task, created: bool, **kwarg
     """
     if not instance.recurrence_rule:
         return  # Not a recurring task
+    if getattr(instance, "_skip_google_calendar_sync", False):
+        return
+    if getattr(instance, "external_google_id", False):
+        return
     
     user = getattr(instance, "user", None)
     if not user:
@@ -39,6 +43,33 @@ def sync_recurring_task_to_google(sender, instance: Task, created: bool, **kwarg
         logger.error(f"Calendar sync error for recurring task {instance.id}: {str(e)}", exc_info=True)
 
 
+@receiver(post_save, sender=Habit)
+def sync_recurring_habit_to_google(sender, instance: Habit, created: bool, **kwargs):
+    if not instance.recurrence_rule:
+        return
+    if getattr(instance, "_skip_google_calendar_sync", False):
+        return
+    if getattr(instance, "external_google_id", False):
+        return
+
+    user = getattr(instance, "user", None)
+    if not user:
+        logger.warning(f"Sync skipped: No user found for habit {instance.id}")
+        return
+
+    try:
+        logger.info(f"Syncing recurring habit {instance.id} for user {user.username}")
+        from integrations.models import GoogleCalendarConnection
+        connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
+        if not connection:
+            logger.info(f"Google Calendar not connected for user {user.username} - skipping recurring habit sync")
+            return
+        result = create_recurring_google_event(user, instance, calendar_id="primary")
+        logger.info(f"Recurring habit sync result: {result}")
+    except Exception as e:
+        logger.error(f"Calendar sync error for recurring habit {instance.id}: {str(e)}", exc_info=True)
+
+
 @receiver(post_save, sender=TaskOccurrence)
 def sync_occurrence_to_google(sender, instance: TaskOccurrence, created: bool, **kwargs):
     """
@@ -49,6 +80,8 @@ def sync_occurrence_to_google(sender, instance: TaskOccurrence, created: bool, *
     user = getattr(parent, "user", None)
     if not user:
         logger.warning(f"Sync skipped: No user found for occurrence {instance.id}")
+        return
+    if getattr(instance, "synced_from_google", False):
         return
 
     try:
