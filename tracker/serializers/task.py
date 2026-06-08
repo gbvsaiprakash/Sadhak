@@ -17,6 +17,7 @@ from tracker.services import (
     sync_occurrence_reminders_for_parent,
 )
 from tracker.services.dependency import get_dependencies, set_dependencies
+from integrations.services import sync_parent_reminders_to_google
 
 
 class TaskOccurrenceSerializer(serializers.ModelSerializer):
@@ -519,6 +520,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
                 generate_occurrences(task, from_date=effective_from, to_date=to_date)
         elif reminder_changed:
             sync_occurrence_reminders_for_parent(task)
+            sync_parent_reminders_to_google(task.user, task)
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:

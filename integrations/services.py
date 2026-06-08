@@ -5,6 +5,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import logging
+import time as pytime
 from datetime import datetime, timezone, timedelta, time
 
 from django.core.cache import cache
@@ -26,6 +27,8 @@ GOOGLE_CALENDAR_WATCH_URL = "https://www.googleapis.com/calendar/v3/calendars/{c
 def _env(name: str, default: str | None = None) -> str | None:
     return os.getenv(name, default)
 
+class GoogleTokenExpiredException(Exception):
+    pass
 
 def build_google_oauth_url(mode: str, redirect_uri: str) -> tuple[str, str]:
     client_id = _env("GOOGLE_OAUTH_CLIENT_ID", "")
@@ -94,8 +97,15 @@ def refresh_access_token(refresh_token: str) -> dict:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.loads(r.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        # Read and print the actual reason from Google
+        error_body = e.read().decode('utf-8')
+        return json.loads(error_body)
+        # Prevent a generic 500 crash by raising an explicit exception
+        # raise ValueError(f"Google Token Refresh Failed: {error_body}")
 
 
 def fetch_google_user_info(access_token: str) -> dict:
@@ -115,58 +125,106 @@ def compute_expiry(expires_in_seconds: int | None) -> datetime | None:
 
 def ensure_valid_access_token(connection: GoogleCalendarConnection) -> str:
     if connection.access_token and connection.token_expiry and connection.token_expiry > dj_timezone.now() + timedelta(seconds=30):
-        return decrypt_token(connection.access_token)
+        return decrypt_token(connection.access_token), ""
 
     token_data = refresh_access_token(decrypt_token(connection.refresh_token))
-    access_token = token_data.get("access_token")
+    access_token = token_data.get("access_token", "")
     if not access_token:
-        raise ValueError("Unable to refresh Google access token")
+        return "", token_data.get("error_description", "Unknown error during token refresh")
+        # raise ValueError("Unable to refresh Google access token")
     connection.access_token = encrypt_token(access_token)
     expires_in = token_data.get("expires_in")
     connection.token_expiry = compute_expiry(expires_in)
     if token_data.get("scope"):
         connection.scope = token_data.get("scope")
     connection.save(update_fields=["access_token", "token_expiry", "scope", "updated_at"])
-    return access_token
+    return access_token, token_data.get("error_description", "")
 
 
 def _google_request_json(method: str, url: str, access_token: str, data: dict | None = None) -> dict:
+    return _google_request_json_with_retry(method, url, access_token, data)
+
+
+def _google_request_json_with_retry(
+    method: str,
+    url: str,
+    access_token: str,
+    data: dict | None = None,
+    extra_headers: dict | None = None,
+    retries: int = 3,
+) -> dict:
     body = json.dumps(data).encode() if data is not None else None
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=25) as r:
-            raw = r.read().decode() or "{}"
-            return json.loads(raw)
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode() if hasattr(e, "read") else str(e)
-        raise ValueError(f"Google API error {e.code}: {detail}")
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update({k: v for k, v in extra_headers.items() if v is not None})
+
+    transient_statuses = {429, 500, 502, 503, 504}
+    last_error = None
+    for attempt in range(retries):
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method=method,
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25) as r:
+                raw = r.read().decode() or "{}"
+                return json.loads(raw)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode() if hasattr(e, "read") else str(e)
+            if e.code == 412:
+                raise ValueError(f"Google API conflict: {detail}")
+            if e.code in transient_statuses and attempt < retries - 1:
+                last_error = e
+                pytime.sleep(0.2 * (attempt + 1))
+                continue
+            raise ValueError(f"Google API error {e.code}: {detail}")
+        except urllib.error.URLError as e:
+            last_error = e
+            if attempt < retries - 1:
+                pytime.sleep(0.2 * (attempt + 1))
+                continue
+            raise ValueError(f"Google API network error: {e}")
+    if last_error:
+        raise ValueError(f"Google API error: {last_error}")
+    raise ValueError("Google API request failed")
 
 
-def _google_request_no_content(method: str, url: str, access_token: str) -> None:
-    req = urllib.request.Request(
-        url,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=25):
-            return
-    except urllib.error.HTTPError as e:
-        if e.code == 204:
-            return
-        detail = e.read().decode() if hasattr(e, "read") else str(e)
-        raise ValueError(f"Google API error {e.code}: {detail}")
+def _google_request_no_content(method: str, url: str, access_token: str, extra_headers: dict | None = None) -> None:
+    transient_statuses = {429, 500, 502, 503, 504}
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        **({k: v for k, v in (extra_headers or {}).items() if v is not None}),
+    }
+    for attempt in range(3):
+        req = urllib.request.Request(
+            url,
+            method=method,
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25):
+                return
+        except urllib.error.HTTPError as e:
+            if e.code == 204:
+                return
+            detail = e.read().decode() if hasattr(e, "read") else str(e)
+            if e.code == 412:
+                raise ValueError(f"Google API conflict: {detail}")
+            if e.code in transient_statuses and attempt < 2:
+                pytime.sleep(0.2 * (attempt + 1))
+                continue
+            raise ValueError(f"Google API error {e.code}: {detail}")
+        except urllib.error.URLError as e:
+            if attempt < 2:
+                pytime.sleep(0.2 * (attempt + 1))
+                continue
+            raise ValueError(f"Google API network error: {e}")
 
 
 def google_list_events(access_token: str, calendar_id: str = "primary", sync_token: str | None = None) -> dict:
@@ -209,8 +267,9 @@ def ensure_watch(user, calendar_id: str = "primary") -> GoogleCalendarWatch:
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
     if not connection:
         raise ValueError("Google Calendar not connected")
-    access_token = ensure_valid_access_token(connection)
-
+    access_token, error = ensure_valid_access_token(connection)
+    if error:
+        raise ValueError(f"Access token error: {error}")
     channel_id = secrets.token_urlsafe(24)
     webhook_url = _env("GOOGLE_CALENDAR_WEBHOOK_URL", "")
     if not webhook_url:
@@ -306,6 +365,152 @@ def _map_app_status_to_google(app_status: str) -> tuple[str, dict]:
     return status_map.get(app_status, ("confirmed", {}))
 
 
+def _minutes_value_to_unit(minutes: int) -> dict:
+    if minutes % 60 == 0 and minutes >= 60:
+        return {"value": minutes // 60, "unit": "hours"}
+    return {"value": minutes, "unit": "minutes"}
+
+
+def _google_reminders_to_app_offsets(google_event: dict) -> list[dict]:
+    reminders = (google_event.get("reminders") or {}).get("overrides") or []
+    normalized = []
+    for reminder in reminders:
+        method = reminder.get("method")
+        minutes = reminder.get("minutes")
+        if method not in {"popup", "email"}:
+            continue
+        if not isinstance(minutes, int) or minutes <= 0:
+            continue
+        app_mode = "push" if method == "popup" else "email"
+        unit_payload = _minutes_value_to_unit(minutes)
+        normalized.append(
+            {
+                "value": unit_payload["value"],
+                "unit": unit_payload["unit"],
+                "modes": [app_mode],
+            }
+        )
+    return normalized
+
+
+def _app_reminders_to_google_overrides(parent_or_occurrence) -> list[dict]:
+    overrides = []
+    if hasattr(parent_or_occurrence, "reminders"):
+        reminders = parent_or_occurrence.reminders.filter(is_deleted=False)
+        for reminder in reminders:
+            method = "popup" if reminder.mode == "push" else "email" if reminder.mode == "email" else None
+            if not method:
+                continue
+            overrides.append(
+                {
+                    "method": method,
+                    "minutes": int(reminder.offset_minutes),
+                }
+            )
+        return overrides
+
+    normalized = getattr(parent_or_occurrence, "get_normalized_reminders", None)
+    if callable(normalized):
+        for reminder in normalized() or []:
+            modes = reminder.get("modes") or []
+            minutes = reminder["value"] * 60 if reminder["unit"] == "hours" else reminder["value"]
+            for mode in modes:
+                method = "popup" if mode == "push" else "email" if mode == "email" else None
+                if not method:
+                    continue
+                overrides.append({"method": method, "minutes": int(minutes)})
+    return overrides
+
+
+def _build_google_reminders_payload(parent_or_occurrence) -> dict:
+    overrides = _app_reminders_to_google_overrides(parent_or_occurrence)
+    if not overrides:
+        return {"useDefault": True}
+    return {"useDefault": False, "overrides": overrides}
+
+
+def _occurrence_due_dt(occurrence):
+    from datetime import datetime, time as dt_time
+
+    scheduled_time = occurrence.scheduled_time or dt_time(0, 0)
+    return dj_timezone.make_aware(
+        datetime.combine(occurrence.scheduled_date, scheduled_time),
+        dj_timezone.get_current_timezone(),
+    )
+
+
+def sync_parent_reminders_to_google(user, parent, calendar_id: str = "primary") -> dict:
+    connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
+    if not connection:
+        return {"synced": False, "reason": "not_connected"}
+    if not getattr(parent, "google_event_id", None):
+        return {"synced": False, "reason": "missing_google_event_id"}
+
+    access_token, error = ensure_valid_access_token(connection)
+    if error:
+        return {"synced": False, "reason": f"access_token_error: {error}"}
+    encoded_calendar = urllib.parse.quote(calendar_id, safe="")
+    encoded_event = urllib.parse.quote(parent.google_event_id, safe="")
+    event_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/{encoded_event}"
+    payload = {"reminders": _build_google_reminders_payload(parent)}
+
+    res = _google_request_json("PATCH", event_url, access_token, payload)
+    return {
+        "synced": True,
+        "google_event_id": parent.google_event_id,
+        "etag": res.get("etag"),
+    }
+
+
+def sync_google_notifications_to_app(user, google_event: dict, parent=None, occurrence=None) -> dict:
+    from tracker.models import TaskOccurrence
+
+    reminder_offsets = _google_reminders_to_app_offsets(google_event)
+    if not reminder_offsets:
+        return {"synced": False, "reason": "no_google_reminders"}
+
+    if occurrence is None and parent is not None:
+        occurrence = parent.occurrences.filter(is_deleted=False).order_by("scheduled_date", "scheduled_time", "created_at").first()
+    if occurrence is None:
+        return {"synced": False, "reason": "occurrence_not_found"}
+
+    removed_ids = []
+    existing = occurrence.reminders.all()
+    for reminder in existing:
+        reminder.is_deleted = True
+        reminder.synced_to_google = True
+        reminder.save(update_fields=["is_deleted", "synced_to_google", "updated_at"])
+        removed_ids.append(str(reminder.id))
+
+    created_ids = []
+    for reminder in reminder_offsets:
+        modes = reminder["modes"]
+        minutes = reminder["value"] * 60 if reminder["unit"] == "hours" else reminder["value"]
+        for mode in modes:
+            reminder_row, _ = occurrence.reminders.update_or_create(
+                offset_minutes=minutes,
+                mode=mode,
+                defaults={
+                    "remind_at": _occurrence_due_dt(occurrence) - timedelta(minutes=minutes),
+                    "event_emitted": False,
+                    "event_emitted_at": None,
+                    "sent": False,
+                    "sent_at": None,
+                    "google_notification_id": google_event.get("id"),
+                    "synced_to_google": True,
+                    "is_deleted": False,
+                },
+            )
+            created_ids.append(str(reminder_row.id))
+
+    if parent is not None:
+        parent.reminder_enabled = True
+        parent.reminder_offset = reminder_offsets
+        parent.save(update_fields=["reminder_enabled", "reminder_offset", "updated_at"])
+
+    return {"synced": True, "created": created_ids, "removed": removed_ids}
+
+
 def _map_google_status_to_app(google_status: str, extended_props: dict) -> str:
     """
     Map Google Calendar event status back to app occurrence status.
@@ -324,20 +529,22 @@ def pull_google_delta_for_watch(watch: GoogleCalendarWatch) -> dict:
     connection = GoogleCalendarConnection.objects.filter(user=watch.user, is_active=True).first()
     if not connection:
         raise ValueError("Google Calendar connection not found")
-    access_token = ensure_valid_access_token(connection)
+    access_token, error = ensure_valid_access_token(connection)
+    if error:
+        return {"synced": False, "reason": f"access_token_error: {error}"}
     data = google_list_events(access_token, calendar_id=watch.calendar_id, sync_token=watch.sync_token)
     items = data.get("items", [])
     changed = upsert_mirror_events(watch.user, watch.calendar_id, items)
     
     recurring_synced = 0
     for item in items:
-        if item.get("recurringEventId"):
+        if item.get("recurringEventId") or item.get("recurrence"):
             result = sync_google_recurring_change(watch.user, item, calendar_id=watch.calendar_id)
             if result.get("synced"):
                 recurring_synced += 1
-        elif item.get("recurrence"):
-            result = sync_google_recurring_change(watch.user, item, calendar_id=watch.calendar_id)
-            if result.get("synced"):
+        else:
+            external_result = sync_external_google_event_to_app(watch.user, item, calendar_id=watch.calendar_id)
+            if external_result.get("synced"):
                 recurring_synced += 1
 
     # Sync status changes from Google to app occurrences
@@ -383,6 +590,9 @@ def sync_google_status_to_app_occurrences(user, calendar_id: str, google_items: 
             occurrence = TaskOccurrence.objects.get(id=mapping.local_occurrence_id)
         except TaskOccurrence.DoesNotExist:
             continue
+
+        if _is_google_update_stale(mapping, item):
+            continue
         
         # Map Google status to app status
         google_status = item.get("status", "confirmed")
@@ -398,7 +608,8 @@ def sync_google_status_to_app_occurrences(user, calendar_id: str, google_items: 
             # Update mapping timestamps
             mapping.last_google_updated_at = dj_timezone.now()
             mapping.etag = item.get("etag")
-            mapping.save(update_fields=["last_google_updated_at", "etag", "updated_at"])
+            mapping.google_etag = item.get("etag")
+            mapping.save(update_fields=["last_google_updated_at", "etag", "google_etag", "updated_at"])
     
     return synced_count
 
@@ -409,6 +620,31 @@ def _to_naive_datetime(value: datetime | None) -> datetime | None:
     if dj_timezone.is_aware(value):
         return dj_timezone.localtime(value, timezone.utc).replace(tzinfo=None)
     return value
+
+
+def _google_event_updated_at(google_event: dict) -> datetime | None:
+    updated_raw = google_event.get("updated")
+    if not updated_raw:
+        return None
+    try:
+        updated_dt = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if updated_dt.tzinfo is None:
+        updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+    return updated_dt.astimezone(timezone.utc)
+
+
+def _is_google_update_stale(mapping: EventSyncMap | None, google_event: dict) -> bool:
+    if not mapping:
+        return False
+    google_updated_at = _google_event_updated_at(google_event)
+    if not google_updated_at or not mapping.last_local_updated_at:
+        return False
+    local_updated_at = mapping.last_local_updated_at
+    if dj_timezone.is_naive(local_updated_at):
+        local_updated_at = dj_timezone.make_aware(local_updated_at, timezone.utc)
+    return google_updated_at <= local_updated_at.astimezone(timezone.utc)
 
 
 def _extract_rrule_from_google_event(google_event: dict) -> str | None:
@@ -597,6 +833,9 @@ def sync_google_recurring_to_app(
         },
     )
 
+    if google_event.get("reminders"):
+        sync_google_notifications_to_app(user, google_event, parent=parent)
+
     logger.info(
         "Synced recurring Google event %s to task %s (%s, %s new occurrences)",
         google_event_id,
@@ -620,6 +859,14 @@ def sync_google_recurring_change(user, google_event: dict, calendar_id: str = "p
     recurring_event_id = google_event.get("recurringEventId")
     google_event_id = google_event.get("id")
     status = google_event.get("status", "confirmed")
+    mapping = EventSyncMap.objects.filter(
+        user=user,
+        calendar_id=calendar_id,
+        google_event_id=google_event_id,
+        is_deleted=False,
+    ).first()
+    if _is_google_update_stale(mapping, google_event):
+        return {"synced": False, "reason": "stale_google_event"}
 
     if recurring_event_id:
         recurrence_id = _google_original_start_to_recurrence_id(google_event.get("originalStartTime"))
@@ -653,6 +900,8 @@ def sync_google_recurring_change(user, google_event: dict, calendar_id: str = "p
                 "is_deleted": False,
             },
         )
+        if google_event.get("reminders"):
+            sync_google_notifications_to_app(user, google_event, occurrence=occurrence)
         return {"synced": True, "kind": "exception", "occurrence_id": str(occurrence.id)}
 
     parent = Task.objects.filter(user=user, google_event_id=google_event_id).first()
@@ -677,6 +926,118 @@ def sync_google_recurring_change(user, google_event: dict, calendar_id: str = "p
     return sync_google_recurring_to_app(user, google_event, calendar_id=calendar_id)
 
 
+def sync_external_google_event_to_app(user, google_event: dict, calendar_id: str = "primary") -> dict:
+    from tracker.models import Task, TaskOccurrence
+
+    google_event_id = google_event.get("id")
+    if not google_event_id:
+        return {"synced": False, "reason": "missing_google_event_id"}
+
+    status = google_event.get("status", "confirmed")
+
+    ext_props = (google_event.get("extendedProperties") or {}).get("private", {})
+    if ext_props.get("created_by") == "sadhak_app":
+        return {"synced": False, "reason": "app_created"}
+
+    existing = EventSyncMap.objects.filter(
+        user=user,
+        calendar_id=calendar_id,
+        google_event_id=google_event_id,
+        is_deleted=False,
+    ).first()
+    if _is_google_update_stale(existing, google_event):
+        return {"synced": False, "reason": "stale_google_event"}
+    if existing:
+        if status == "cancelled":
+            parent = None
+            if existing.local_parent_type == "habit":
+                from tracker.models import Habit
+
+                parent = Habit.objects.filter(id=existing.local_task_id, user=user).first() if existing.local_task_id else None
+            else:
+                parent = Task.objects.filter(id=existing.local_task_id, user=user).first() if existing.local_task_id else None
+            occurrence = TaskOccurrence.objects.filter(id=existing.local_occurrence_id, is_deleted=False).first()
+            if occurrence:
+                occurrence.status = "skipped"
+                occurrence.is_deleted = True
+                occurrence.save(update_fields=["status", "is_deleted", "updated_at"])
+            if parent:
+                parent.is_deleted = True
+                parent.save(update_fields=["is_deleted", "updated_at"])
+            existing.is_deleted = True
+            existing.save(update_fields=["is_deleted", "updated_at"])
+            return {"synced": True, "reason": "external_cancelled"}
+        if google_event.get("recurrence"):
+            return sync_google_recurring_change(user, google_event, calendar_id=calendar_id)
+        if google_event.get("reminders"):
+            from tracker.models import Task, TaskOccurrence, Habit
+
+            parent = None
+            occurrence = None
+            if existing.local_parent_type == "habit":
+                parent = Habit.objects.filter(id=existing.local_task_id, user=user).first() if existing.local_task_id else None
+            else:
+                parent = Task.objects.filter(id=existing.local_task_id, user=user).first() if existing.local_task_id else None
+            occurrence = TaskOccurrence.objects.filter(id=existing.local_occurrence_id, is_deleted=False).first()
+            if parent or occurrence:
+                sync_google_notifications_to_app(user, google_event, parent=parent, occurrence=occurrence)
+                return {"synced": True, "reason": "reminders_updated"}
+        return {"synced": False, "reason": "already_synced"}
+
+    if google_event.get("recurrence"):
+        return sync_google_recurring_to_app(user, google_event, calendar_id=calendar_id)
+
+    if status == "cancelled":
+        return {"synced": False, "reason": "cancelled_without_local_record"}
+
+    start_dt, end_dt, _ = _parse_google_event_datetime(google_event)
+    start_dt = _to_naive_datetime(start_dt)
+    end_dt = _to_naive_datetime(end_dt)
+    if start_dt is None:
+        return {"synced": False, "reason": "missing_start_datetime"}
+
+    reminder_offsets = _google_reminders_to_app_offsets(google_event)
+    task = Task.objects.create(
+        user=user,
+        title=google_event.get("summary") or "Google Calendar Event",
+        description=google_event.get("description") or "",
+        section="personal",
+        status="pending",
+        frequency_type="once",
+        start_date=start_dt.date(),
+        end_date=start_dt.date(),
+        start_time=start_dt.time(),
+        end_time=end_dt.time() if end_dt else None,
+        google_event_id=google_event_id,
+        recurrence_rule=None,
+        external_google_id=True,
+        reminder_enabled=bool(reminder_offsets),
+        reminder_offset=reminder_offsets,
+    )
+    occurrence = TaskOccurrence.objects.create(
+        task=task,
+        scheduled_date=start_dt.date(),
+        scheduled_time=start_dt.time(),
+        schedule_end_time=end_dt.time() if end_dt else None,
+        status="pending",
+        google_event_id=google_event_id,
+        synced_from_google=True,
+    )
+    sync_google_notifications_to_app(user, google_event, parent=task, occurrence=occurrence)
+    EventSyncMap.objects.create(
+        user=user,
+        local_occurrence_id=occurrence.id,
+        local_parent_type="task",
+        local_task_id=task.id,
+        google_event_id=google_event_id,
+        calendar_id=calendar_id,
+        etag=google_event.get("etag"),
+        last_google_updated_at=dj_timezone.now(),
+        is_deleted=False,
+    )
+    return {"synced": True, "task_id": str(task.id), "occurrence_id": str(occurrence.id), "created": True}
+
+
 def handle_recurring_occurrence_change(user, occurrence, action: str, calendar_id: str = "primary") -> dict:
     parent = occurrence.task or occurrence.habit
     parent_type = "task" if occurrence.task_id else "habit"
@@ -687,7 +1048,9 @@ def handle_recurring_occurrence_change(user, occurrence, action: str, calendar_i
     if not connection:
         return {"pushed": False, "reason": "not_connected"}
 
-    access_token = ensure_valid_access_token(connection)
+    access_token, error = ensure_valid_access_token(connection)
+    if error:
+        return {"pushed": False, "reason": f"access_token_error: {error}"}
     instance = _find_google_recurring_instance(access_token, calendar_id, parent, occurrence)
     if not instance:
         return {"pushed": False, "reason": "instance_not_found"}
@@ -699,9 +1062,12 @@ def handle_recurring_occurrence_change(user, occurrence, action: str, calendar_i
     encoded_calendar = urllib.parse.quote(calendar_id, safe="")
     encoded_event = urllib.parse.quote(instance_id, safe="")
     instance_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/{encoded_event}"
+    extra_headers = {}
+    if instance.get("etag"):
+        extra_headers["If-Match"] = instance.get("etag")
 
     if action == "delete" or occurrence.is_deleted:
-        _google_request_no_content("DELETE", instance_url, access_token)
+        _google_request_no_content("DELETE", instance_url, access_token, extra_headers=extra_headers)
         occurrence.google_event_id = instance_id
         occurrence.google_recurrence_id = _google_original_start_to_recurrence_id(instance.get("originalStartTime"))
         occurrence.save(update_fields=["google_event_id", "google_recurrence_id", "updated_at"])
@@ -732,7 +1098,7 @@ def handle_recurring_occurrence_change(user, occurrence, action: str, calendar_i
         "status": google_status,
         "extendedProperties": {"private": extended_props},
     }
-    res = _google_request_json("PATCH", instance_url, access_token, payload)
+    res = _google_request_json_with_retry("PATCH", instance_url, access_token, payload, extra_headers=extra_headers)
     recurrence_id = _google_original_start_to_recurrence_id(instance.get("originalStartTime"))
     occurrence.google_event_id = res.get("id", instance_id)
     occurrence.google_recurrence_id = recurrence_id
@@ -814,7 +1180,10 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
         return {"created": False, "error": "Google Calendar not connected"}
     
     try:
-        access_token = ensure_valid_access_token(connection)
+        access_token, error = ensure_valid_access_token(connection)
+        if error:
+            return {"created": False, "error": f"Access token error: {error}"}
+        was_existing_event = bool(task.google_event_id)
         
         # Prepare event payload with recurrence
         tz = "UTC"
@@ -846,13 +1215,20 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
                     "created_by": "sadhak_app",
                 }
             },
+            "reminders": _build_google_reminders_payload(task),
         }
         
         encoded_calendar = urllib.parse.quote(calendar_id, safe="")
         if task.google_event_id:
             encoded_event = urllib.parse.quote(task.google_event_id, safe="")
             event_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/{encoded_event}"
-            res = _google_request_json("PATCH", event_url, access_token, payload)
+            event_mapping = EventSyncMap.objects.filter(
+                user=user,
+                calendar_id=calendar_id,
+                google_event_id=task.google_event_id,
+            ).first()
+            extra_headers = {"If-Match": event_mapping.google_etag} if event_mapping and event_mapping.google_etag else None
+            res = _google_request_json_with_retry("PATCH", event_url, access_token, payload, extra_headers=extra_headers)
             google_event_id = task.google_event_id
         else:
             event_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events"
@@ -888,13 +1264,18 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
                 "is_deleted": False,
             },
         )
+        EventSyncMap.objects.filter(
+            user=user,
+            local_task_id=task.id,
+            google_event_id=google_event_id,
+        ).update(google_etag=res.get("etag"))
         
         logger.info(
             f"Created recurring Google Calendar event {google_event_id} for task {task.id} "
             f"(user {user.username}) with RRULE: {task.recurrence_rule}"
         )
         
-        return {"created": True, "google_event_id": google_event_id, "action": "update" if task.google_event_id else "create", "parent_type": parent_type}
+        return {"created": True, "google_event_id": google_event_id, "action": "update" if was_existing_event else "create", "parent_type": parent_type}
     
     except Exception as e:
         logger.error(f"Error creating recurring Google event for task {task.id}: {str(e)}", exc_info=True)
@@ -924,7 +1305,9 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
     if not connection:
         return {"pushed": False, "reason": "not_connected"}
-    access_token = ensure_valid_access_token(connection)
+    access_token, error = ensure_valid_access_token(connection)
+    if error:
+        return {"pushed": False, "reason": f"access_token_error: {error}"}
     title = (occurrence.task.title if occurrence.task_id else occurrence.habit.title) if (occurrence.task_id or occurrence.habit_id) else "Event"
     tz = "UTC"
     date_str = occurrence.scheduled_date.isoformat()
@@ -943,6 +1326,7 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
         "end": {"dateTime": end_iso, "timeZone": tz},
         "status": google_status,
         "extendedProperties": {"private": extended_props},
+        "reminders": _build_google_reminders_payload(occurrence),
     }
     
     mapping = EventSyncMap.objects.filter(user=user, local_occurrence_id=occurrence.id).first()
@@ -955,8 +1339,9 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
             f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/"
             f"{urllib.parse.quote(mapping.google_event_id, safe='')}"
         )
+        extra_headers = {"If-Match": mapping.google_etag} if mapping.google_etag else None
         try:
-            _google_request_json("DELETE", delete_url, access_token)
+            _google_request_no_content("DELETE", delete_url, access_token, extra_headers=extra_headers)
         except Exception:
             pass
         mapping.is_deleted = True
@@ -968,8 +1353,10 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
             f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/"
             f"{urllib.parse.quote(mapping.google_event_id, safe='')}"
         )
-        res = _google_request_json("PATCH", patch_url, access_token, payload)
+        extra_headers = {"If-Match": mapping.google_etag} if mapping.google_etag else None
+        res = _google_request_json_with_retry("PATCH", patch_url, access_token, payload, extra_headers=extra_headers)
         mapping.etag = res.get("etag")
+        mapping.google_etag = res.get("etag")
         mapping.last_local_updated_at = dj_timezone.now()
         mapping.last_google_updated_at = dj_timezone.now()
         mapping.is_deleted = False
@@ -996,6 +1383,7 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
             "google_event_id": res.get("id", ""),
             "calendar_id": calendar_id,
             "etag": res.get("etag"),
+            "google_etag": res.get("etag"),
             "last_local_updated_at": dj_timezone.now(),
             "last_google_updated_at": dj_timezone.now(),
             "is_deleted": False,

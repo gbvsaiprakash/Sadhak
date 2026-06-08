@@ -17,6 +17,7 @@ from tracker.services import (
     sync_occurrence_reminders_for_parent,
 )
 from tracker.services.dependency import get_dependencies, set_dependencies
+from integrations.services import sync_parent_reminders_to_google
 
 
 class HabitOccurrenceSerializer(serializers.ModelSerializer):
@@ -554,6 +555,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
                 generate_occurrences(habit, from_date=effective_from, to_date=to_date)
         elif reminder_changed:
             sync_occurrence_reminders_for_parent(habit)
+            sync_parent_reminders_to_google(habit.user, habit)
         
         habit.conflict_override = bool(override)
         habit.conflict_override_reason = reason if override else None

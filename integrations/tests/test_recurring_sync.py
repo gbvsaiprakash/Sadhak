@@ -5,9 +5,11 @@ Run with: python manage.py test integrations.tests.test_recurring_sync
 
 import logging
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+import urllib.error
 from django.test import TestCase
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.services import (
     create_recurring_google_event,
@@ -15,6 +17,10 @@ from integrations.services import (
     sync_google_recurring_change,
     delete_task_occurrence_in_app,
     _update_rrule_until_date,
+    sync_external_google_event_to_app,
+    sync_parent_reminders_to_google,
+    sync_google_status_to_app_occurrences,
+    _google_request_json_with_retry,
 )
 from integrations.models import EventSyncMap, GoogleCalendarConnection
 from tracker.models import Task, TaskOccurrence, Habit
@@ -41,17 +47,22 @@ class RecurringTaskSyncTests(TestCase):
             google_sub="google_123",
             refresh_token="encrypted_refresh_token",
             access_token="encrypted_access_token",
-            token_expiry=datetime.now(),
+            token_expiry=timezone.now(),
             scope="calendar",
             is_active=True,
         )
     
+    @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')
     @patch('integrations.services.ensure_valid_access_token')
-    def test_create_recurring_google_event_daily(self, mock_token, mock_request):
+    def test_create_recurring_google_event_daily(self, mock_token, mock_request, mock_retry_request):
         """Test creating a daily recurring event in Google Calendar."""
         mock_token.return_value = "access_token"
         mock_request.return_value = {
+            "id": "google_event_123",
+            "etag": "etag_123",
+        }
+        mock_retry_request.return_value = {
             "id": "google_event_123",
             "etag": "etag_123",
         }
@@ -85,13 +96,76 @@ class RecurringTaskSyncTests(TestCase):
         self.assertTrue(mapping.is_recurring)
         self.assertEqual(mapping.recurrence_rule, task.recurrence_rule)
         logger.info(f"Created recurring event: {result}")
-    
+
+    @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')
     @patch('integrations.services.ensure_valid_access_token')
-    def test_create_recurring_google_event_weekly(self, mock_token, mock_request):
+    def test_create_recurring_google_event_includes_reminders(self, mock_token, mock_request, mock_retry_request):
+        mock_token.return_value = "access_token"
+        mock_request.return_value = {"id": "google_event_with_reminders", "etag": "etag_reminders"}
+        mock_retry_request.return_value = {"id": "google_event_with_reminders", "etag": "etag_reminders"}
+
+        task = Task.objects.create(
+            user=self.user,
+            title="Reminder Task",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 5),
+            end_date=date(2026, 6, 5),
+            start_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+            end_time=datetime.strptime("09:30:00", "%H:%M:%S").time(),
+            reminder_enabled=True,
+            reminder_offset=[{"value": 15, "unit": "minutes", "modes": ["push"]}],
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260605",
+        )
+
+        result = create_recurring_google_event(self.user, task)
+
+        self.assertTrue(result["created"])
+        payload = mock_request.call_args[0][3]
+        self.assertEqual(payload["reminders"]["useDefault"], False)
+        self.assertEqual(payload["reminders"]["overrides"][0]["method"], "popup")
+        self.assertEqual(payload["reminders"]["overrides"][0]["minutes"], 15)
+
+    @patch('integrations.services._google_request_json')
+    @patch('integrations.services.ensure_valid_access_token')
+    def test_sync_parent_reminders_to_google_pushes_google_reminders(self, mock_token, mock_request):
+        mock_token.return_value = "access_token"
+        mock_request.return_value = {"etag": "etag_push_reminders"}
+
+        task = Task.objects.create(
+            user=self.user,
+            title="Reminder Push",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            reminder_enabled=True,
+            reminder_offset=[{"value": 1, "unit": "hours", "modes": ["push", "email"]}],
+            google_event_id="google_push_event_1",
+        )
+
+        result = sync_parent_reminders_to_google(self.user, task)
+
+        self.assertTrue(result["synced"])
+        payload = mock_request.call_args[0][3]
+        self.assertFalse(payload["reminders"]["useDefault"])
+        self.assertEqual(len(payload["reminders"]["overrides"]), 2)
+    
+    @patch('integrations.services._google_request_json_with_retry')
+    @patch('integrations.services._google_request_json')
+    @patch('integrations.services.ensure_valid_access_token')
+    def test_create_recurring_google_event_weekly(self, mock_token, mock_request, mock_retry_request):
         """Test creating a weekly recurring event (Mon, Wed, Fri)."""
         mock_token.return_value = "access_token"
         mock_request.return_value = {
+            "id": "google_event_456",
+            "etag": "etag_456",
+        }
+        mock_retry_request.return_value = {
             "id": "google_event_456",
             "etag": "etag_456",
         }
@@ -132,12 +206,17 @@ class RecurringTaskSyncTests(TestCase):
         self.assertTrue(payload["recurrence"][0].startswith("RRULE:"))
         logger.info(f"Weekly recurring event created: {payload['recurrence']}")
     
+    @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')
     @patch('integrations.services.ensure_valid_access_token')
-    def test_create_recurring_google_event_monthly(self, mock_token, mock_request):
+    def test_create_recurring_google_event_monthly(self, mock_token, mock_request, mock_retry_request):
         """Test creating a monthly recurring event."""
         mock_token.return_value = "access_token"
         mock_request.return_value = {
+            "id": "google_event_789",
+            "etag": "etag_789",
+        }
+        mock_retry_request.return_value = {
             "id": "google_event_789",
             "etag": "etag_789",
         }
@@ -372,6 +451,83 @@ class GoogleRecurringModificationTests(TestCase):
         self.assertEqual(occurrence.status, "completed")
         self.assertEqual(occurrence.google_event_id, "instance_1")
 
+    def test_sync_google_status_to_app_skips_stale_google_update(self):
+        task = Task.objects.create(
+            user=self.user,
+            title="Stale Status Task",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 5),
+            start_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+            end_date=date(2026, 6, 5),
+        )
+        occurrence = TaskOccurrence.objects.create(
+            task=task,
+            scheduled_date=date(2026, 6, 5),
+            scheduled_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+            status="pending",
+        )
+        EventSyncMap.objects.create(
+            user=self.user,
+            local_occurrence_id=occurrence.id,
+            local_parent_type="task",
+            local_task_id=task.id,
+            google_event_id="google_stale_1",
+            calendar_id="primary",
+            last_local_updated_at=timezone.now(),
+            last_google_updated_at=timezone.now() - timedelta(hours=2),
+            is_deleted=False,
+        )
+
+        synced = sync_google_status_to_app_occurrences(
+            self.user,
+            "primary",
+            [
+                {
+                    "id": "google_stale_1",
+                    "status": "cancelled",
+                    "updated": "2026-01-01T00:00:00Z",
+                    "etag": "etag_stale",
+                    "extendedProperties": {"private": {}},
+                }
+            ],
+        )
+
+        occurrence.refresh_from_db()
+        self.assertEqual(synced, 0)
+        self.assertEqual(occurrence.status, "pending")
+
+    @patch("integrations.services.pytime.sleep")
+    def test_google_request_json_retries_transient_network_error(self, mock_sleep):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return self.payload
+
+        calls = {"count": 0}
+
+        def fake_urlopen(request, timeout=25):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise urllib.error.URLError("temporary outage")
+            return FakeResponse(b'{"ok": true}')
+
+        with patch("integrations.services.urllib.request.urlopen", side_effect=fake_urlopen):
+            result = _google_request_json_with_retry("GET", "https://example.com", "token")
+
+        self.assertEqual(result["ok"], True)
+        self.assertEqual(calls["count"], 2)
+        self.assertTrue(mock_sleep.called)
+
     @patch("integrations.services.create_recurring_google_event")
     def test_delete_task_occurrence_in_app_for_future_updates_rrule(self, mock_create):
         mock_create.return_value = {"created": True, "action": "update", "google_event_id": "root_series_2"}
@@ -414,16 +570,18 @@ class HabitRecurringSyncTests(TestCase):
             google_sub="google_habit_123",
             refresh_token="encrypted_refresh_token",
             access_token="encrypted_access_token",
-            token_expiry=datetime.now(),
+            token_expiry=timezone.now(),
             scope="calendar",
             is_active=True,
         )
 
+    @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')
     @patch('integrations.services.ensure_valid_access_token')
-    def test_create_recurring_google_event_for_habit(self, mock_token, mock_request):
+    def test_create_recurring_google_event_for_habit(self, mock_token, mock_request, mock_retry_request):
         mock_token.return_value = "access_token"
         mock_request.return_value = {"id": "habit_google_event_1", "etag": "habit_etag_1"}
+        mock_retry_request.return_value = {"id": "habit_google_event_1", "etag": "habit_etag_1"}
 
         habit = Habit.objects.create(
             user=self.user,
@@ -480,6 +638,86 @@ class HabitRecurringSyncTests(TestCase):
         habit.refresh_from_db()
         self.assertEqual(habit.title, "Updated Habit")
         self.assertEqual(TaskOccurrence.objects.filter(habit=habit).count(), 3)
+
+    def test_sync_external_google_single_event_with_reminders(self):
+        result = sync_external_google_event_to_app(
+            self.user,
+            {
+                "id": "google_external_single",
+                "etag": "etag_external_single",
+                "summary": "Doctor Visit",
+                "description": "External calendar entry",
+                "start": {"dateTime": "2026-06-08T10:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-08T11:00:00Z", "timeZone": "UTC"},
+                "reminders": {
+                    "useDefault": False,
+                    "overrides": [
+                        {"method": "popup", "minutes": 15},
+                        {"method": "email", "minutes": 60},
+                    ],
+                },
+            },
+        )
+
+        self.assertTrue(result["synced"])
+        task = Task.objects.get(google_event_id="google_external_single")
+        self.assertTrue(task.reminder_enabled)
+        self.assertEqual(len(task.reminder_offset), 2)
+        occurrence = TaskOccurrence.objects.get(task=task)
+        self.assertEqual(occurrence.reminders.count(), 2)
+
+    def test_sync_external_google_all_day_event_creates_task(self):
+        result = sync_external_google_event_to_app(
+            self.user,
+            {
+                "id": "google_all_day_event",
+                "etag": "etag_all_day",
+                "summary": "All Day Conference",
+                "description": "All-day external event",
+                "start": {"date": "2026-06-08"},
+                "end": {"date": "2026-06-09"},
+            },
+        )
+
+        self.assertTrue(result["synced"])
+        task = Task.objects.get(google_event_id="google_all_day_event")
+        self.assertEqual(task.start_date, date(2026, 6, 8))
+        occurrence = TaskOccurrence.objects.get(task=task)
+        self.assertEqual(occurrence.scheduled_date, date(2026, 6, 8))
+
+    def test_sync_external_google_single_event_cancellation_marks_deleted(self):
+        created = sync_external_google_event_to_app(
+            self.user,
+            {
+                "id": "google_external_cancel",
+                "etag": "etag_external_cancel",
+                "summary": "Cancelled Event",
+                "description": "Create then cancel",
+                "start": {"dateTime": "2026-06-08T12:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-08T13:00:00Z", "timeZone": "UTC"},
+            },
+        )
+
+        self.assertTrue(created["synced"])
+
+        cancelled = sync_external_google_event_to_app(
+            self.user,
+            {
+                "id": "google_external_cancel",
+                "etag": "etag_external_cancel_2",
+                "status": "cancelled",
+                "summary": "Cancelled Event",
+                "start": {"dateTime": "2026-06-08T12:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-08T13:00:00Z", "timeZone": "UTC"},
+            },
+        )
+
+        self.assertTrue(cancelled["synced"])
+        task = Task.objects.get(google_event_id="google_external_cancel")
+        self.assertTrue(task.is_deleted)
+        occurrence = TaskOccurrence.objects.get(task=task)
+        self.assertTrue(occurrence.is_deleted)
+        self.assertEqual(occurrence.status, "skipped")
     
     def test_distinguish_recurring_from_single(self):
         """Test that we can distinguish recurring events from single events."""

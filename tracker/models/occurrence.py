@@ -89,6 +89,16 @@ class OccurrenceReminder(UUIDTimeStampedModel):
 
     sent = models.BooleanField(default=False, db_index=True)
     sent_at = models.DateTimeField(blank=True, null=True)
+    google_notification_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Google reminder/notification identifier",
+    )
+    synced_to_google = models.BooleanField(
+        default=False,
+        help_text="True if this reminder has been mirrored to Google Calendar",
+    )
 
     class Meta:
         indexes = [

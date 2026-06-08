@@ -29,6 +29,9 @@ from integrations.services import (
     pull_google_delta_for_watch,
     ensure_valid_access_token,
     sync_google_status_to_app_occurrences,
+    sync_google_recurring_change,
+    sync_external_google_event_to_app,
+    GoogleTokenExpiredException,
 )
 from user_management.models import User
 from user_management.views import AuthenticatedAPIView
@@ -227,7 +230,36 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
         c = GoogleCalendarConnection.objects.filter(user=request.user, is_active=True).first()
         if not c:
             return Response({"message": "Google Calendar is not connected"}, status=status.HTTP_400_BAD_REQUEST)
-        access_token = ensure_valid_access_token(c)
+        try:
+            access_token, error = ensure_valid_access_token(c)
+            if error:
+                # c.refresh_token = None
+                # c.access_token = None
+                # c.is_active = False # Or however your model tracks connection status
+                # c.save()
+                return Response(
+                    {
+                        "message": "Google Calendar access token error",
+                        "detail": f"Access token error: {error}. Please reconnect your Google Calendar."
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+        except GoogleTokenExpiredException:
+            # 1. Clear out the broken tokens so you don't keep hitting Google uselessly
+            c.refresh_token = None
+            c.access_token = None
+            c.is_active = False # Or however your model tracks connection status
+            c.save()
+            
+            # 2. Return a 401 response with instructions for the frontend
+            return Response(
+                {
+                    "error": "google_reauthentication_required",
+                    "detail": "Your Google connection has expired. Please re-authenticate."
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
 
         watch = request.user.google_calendar_watches.filter(calendar_id=calendar_id, is_active=True).first()
         if not watch:
@@ -236,6 +268,14 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
         data = google_list_events(access_token, calendar_id=calendar_id)
         items = data.get("items", [])
         changed = upsert_mirror_events(request.user, calendar_id, items)
+        external_synced = 0
+        for item in items:
+            if item.get("recurringEventId") or item.get("recurrence"):
+                result = sync_google_recurring_change(request.user, item, calendar_id=calendar_id)
+            else:
+                result = sync_external_google_event_to_app(request.user, item, calendar_id=calendar_id)
+            if result.get("synced"):
+                external_synced += 1
         
         # Sync status changes from Google to app occurrences
         status_synced = sync_google_status_to_app_occurrences(request.user, calendar_id, items)
@@ -250,6 +290,7 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
                 "message": "Full sync fetched successfully",
                 "fetched_events": len(items),
                 "upserted_events": changed,
+                "external_synced": external_synced,
                 "status_synced": status_synced,
                 "next_sync_token": next_sync_token,
             },
