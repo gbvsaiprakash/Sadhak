@@ -233,10 +233,8 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
         try:
             access_token, error = ensure_valid_access_token(c)
             if error:
-                # c.refresh_token = None
-                # c.access_token = None
-                # c.is_active = False # Or however your model tracks connection status
-                # c.save()
+                GoogleCalendarConnection.objects.filter(user=request.user).update(is_active=False)
+                request.user.google_calendar_watches.update(is_active=False)
                 return Response(
                     {
                         "message": "Google Calendar access token error",
@@ -246,10 +244,12 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
                 )
         except GoogleTokenExpiredException:
             # 1. Clear out the broken tokens so you don't keep hitting Google uselessly
-            c.refresh_token = None
-            c.access_token = None
-            c.is_active = False # Or however your model tracks connection status
-            c.save()
+            # c.refresh_token = None
+            # c.access_token = None
+            # c.is_active = False # Or however your model tracks connection status
+            # c.save()
+            GoogleCalendarConnection.objects.filter(user=request.user).update(is_active=False)
+            request.user.google_calendar_watches.update(is_active=False)
             
             # 2. Return a 401 response with instructions for the frontend
             return Response(
@@ -265,7 +265,7 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
         if not watch:
             watch = ensure_watch(request.user, calendar_id=calendar_id)
 
-        data = google_list_events(access_token, calendar_id=calendar_id)
+        data = google_list_events(access_token, calendar_id=calendar_id, user=request.user)
         items = data.get("items", [])
         changed = upsert_mirror_events(request.user, calendar_id, items)
         external_synced = 0

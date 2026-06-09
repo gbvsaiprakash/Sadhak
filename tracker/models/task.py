@@ -5,10 +5,10 @@ from tracker.constants import FREQUENCY_PERIOD_CHOICES, FREQUENCY_TYPE_CHOICES, 
 from sadhak_base.models import UUIDTimeStampedModel
 
 def default_duration_config():
-        return [{"value": 30, "unit": "minutes", "mode": "in-app"}]
+        return {"value": 30, "unit": "minutes"}
 
 def default_reminder_config():
-        return [{"value": 10, "unit": "minutes", "mode": "in-app"}]
+        return [{"value": 10, "unit": "minutes", "modes": ["in-app"]}]
 
 class Task(UUIDTimeStampedModel):
     user = models.ForeignKey(getattr(settings, "AUTH_USER_MODEL", "auth.User"), on_delete=models.CASCADE, related_name="tracker_tasks")

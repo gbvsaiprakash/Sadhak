@@ -227,12 +227,19 @@ def _google_request_no_content(method: str, url: str, access_token: str, extra_h
             raise ValueError(f"Google API network error: {e}")
 
 
-def google_list_events(access_token: str, calendar_id: str = "primary", sync_token: str | None = None) -> dict:
+def google_list_events(access_token: str, calendar_id: str = "primary", sync_token: str | None = None, user=None) -> dict:
     params = {"singleEvents": "true", "maxResults": "2500"}
     if sync_token:
         params["syncToken"] = sync_token
     else:
-        params["timeMin"] = datetime.now(timezone.utc).isoformat()
+        if user and getattr(user, "verified_at", None):
+            # Safe conversion to UTC string regardless of DB timezone settings
+            verified_dt = user.verified_at
+            if isinstance(verified_dt, str):
+                verified_dt = datetime.fromisoformat(verified_dt)
+            params["timeMin"] = verified_dt.astimezone(timezone.utc).isoformat()
+        else:
+            params["timeMin"] = datetime.now(timezone.utc).isoformat()
     url = GOOGLE_CALENDAR_EVENTS_URL.format(
         calendar_id=urllib.parse.quote(calendar_id, safe="")
     ) + "?" + urllib.parse.urlencode(params)
@@ -249,9 +256,9 @@ def google_list_event_instances(
 ) -> dict:
     params = {}
     if time_min:
-        params["timeMin"] = time_min.replace(tzinfo=timezone.utc).isoformat()
+        params["timeMin"] = time_min.astimezone(timezone.utc).isoformat()
     if time_max:
-        params["timeMax"] = time_max.replace(tzinfo=timezone.utc).isoformat()
+        params["timeMax"] = time_max.astimezone(timezone.utc).isoformat()
     encoded_calendar = urllib.parse.quote(calendar_id, safe="")
     encoded_event_id = urllib.parse.quote(event_id, safe="")
     url = (
@@ -618,6 +625,20 @@ def _to_naive_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if dj_timezone.is_aware(value):
+        # Extract the timezone name or offset
+        tz_name = str(value.tzinfo)
+        
+        # Check if the incoming datetime is explicitly UTC
+        if "UTC" in tz_name or value.utcoffset().total_seconds() == 0:
+            # Convert UTC to local system time (IST), then strip tzinfo
+            return dj_timezone.localtime(value).replace(tzinfo=None)
+            
+        # Check if the incoming datetime is already IST
+        elif "IST" in tz_name or value.utcoffset().total_seconds() == 19800: # 5h 30m
+            # Already IST, just strip the timezone info
+            return value.replace(tzinfo=None)
+            
+        # Fallback for any other aware timezone
         return dj_timezone.localtime(value, timezone.utc).replace(tzinfo=None)
     return value
 
@@ -993,6 +1014,7 @@ def sync_external_google_event_to_app(user, google_event: dict, calendar_id: str
     start_dt, end_dt, _ = _parse_google_event_datetime(google_event)
     start_dt = _to_naive_datetime(start_dt)
     end_dt = _to_naive_datetime(end_dt)
+    duration = (end_dt - start_dt) if start_dt and end_dt else None
     if start_dt is None:
         return {"synced": False, "reason": "missing_start_datetime"}
 
@@ -1008,6 +1030,7 @@ def sync_external_google_event_to_app(user, google_event: dict, calendar_id: str
         end_date=start_dt.date(),
         start_time=start_dt.time(),
         end_time=end_dt.time() if end_dt else None,
+        duration_config={"unit": "minutes", "value": int(duration.total_seconds() // 60)} if duration else None,
         google_event_id=google_event_id,
         recurrence_rule=None,
         external_google_id=True,
