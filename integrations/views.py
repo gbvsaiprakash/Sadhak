@@ -18,6 +18,7 @@ from integrations.serializers import (
     GoogleCalendarMirrorEventSerializer,
 )
 from integrations.services import (
+    _coerce_access_token_result,
     build_google_oauth_url,
     validate_state_and_get_mode,
     exchange_code_for_token,
@@ -231,7 +232,7 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
         if not c:
             return Response({"message": "Google Calendar is not connected"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            access_token, error = ensure_valid_access_token(c)
+            access_token, error = _coerce_access_token_result(ensure_valid_access_token(c))
             if error:
                 GoogleCalendarConnection.objects.filter(user=request.user).update(is_active=False)
                 request.user.google_calendar_watches.update(is_active=False)

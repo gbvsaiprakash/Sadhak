@@ -142,7 +142,25 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     
     def get_duration(self, obj):
         cfg = obj.duration_config or {"value": 30, "unit": "minutes"}
-        return {"value": int(cfg.get("value", 30)), "unit": cfg.get("unit", "minutes")}
+        unit = str(cfg.get("unit", "minutes")).lower()
+        if unit not in {"minutes", "hours"}:
+            unit = "minutes"
+        try:
+            value = int(cfg.get("value", 30) or 30)
+        except (TypeError, ValueError):
+            value = 30
+        return {"value": value, "unit": unit}
+
+    def _normalize_duration_config(self, config=None):
+        cfg = config or {"value": 30, "unit": "minutes"}
+        try:
+            value = int(cfg.get("value", 30) or 30)
+        except (TypeError, ValueError):
+            value = 30
+        unit = str(cfg.get("unit", "minutes")).lower()
+        if unit not in {"minutes", "hours"}:
+            unit = "minutes"
+        return {"value": value, "unit": unit}
 
     def _effective_duration_config(self, attrs):
         v = attrs.pop("duration_value", None)
@@ -154,14 +172,15 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             raise_tracker_error("INVALID_DURATION", "duration_value is required when duration_unit is provided.")
 
         if v is not None and u is not None:
-            attrs["duration_config"] = {"value": int(v), "unit": u}
+            attrs["duration_config"] = self._normalize_duration_config({"value": v, "unit": u})
             return
         
         if attrs.get("duration_config") is not None:
+            attrs["duration_config"] = self._normalize_duration_config(attrs.get("duration_config"))
             return
 
         if self.instance is not None and getattr(self.instance, "duration_config", None):
-            attrs["duration_config"] = self.instance.duration_config
+            attrs["duration_config"] = self._normalize_duration_config(self.instance.duration_config)
         else:
             attrs["duration_config"] = {"value": 30, "unit": "minutes"}
 
@@ -341,6 +360,8 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
                 and o["scheduled_date"] >= start
                 and (end is None or o["scheduled_date"] <= end)
             ]
+        
+        data["duration_config"] = self._normalize_duration_config(data.get("duration_config"))
         normalized = []
         for item in (data.get("reminder_offset") or []):
             # backward compatibility for old stored records

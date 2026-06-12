@@ -106,8 +106,20 @@ class Task(UUIDTimeStampedModel):
 
         return normalized
 
+    def _normalize_duration_config(self):
+        cfg = self.duration_config or default_duration_config()
+        try:
+            value = int(cfg.get("value", 30) or 30)
+        except (TypeError, ValueError):
+            value = 30
+        unit = str(cfg.get("unit", "minutes")).lower()
+        if unit not in ("minutes", "hours"):
+            unit = "minutes"
+        self.duration_config = {"value": value, "unit": unit}
+    
     def clean(self):
         super().clean()
+        self._normalize_duration_config()
 
         if not self.reminder_enabled:
             return
@@ -163,3 +175,4 @@ class Task(UUIDTimeStampedModel):
             self.reminder_offset = []
         self.full_clean()
         super().save(*args, **kwargs)
+        

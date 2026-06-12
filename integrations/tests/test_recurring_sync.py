@@ -5,14 +5,17 @@ Run with: python manage.py test integrations.tests.test_recurring_sync
 
 import logging
 import uuid
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone as dt_timezone
 import urllib.error
+import urllib.parse
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.services import (
     create_recurring_google_event,
+    google_list_events,
+    pull_google_delta_for_watch,
     sync_google_recurring_to_app,
     sync_google_recurring_change,
     delete_task_occurrence_in_app,
@@ -22,7 +25,7 @@ from integrations.services import (
     sync_google_status_to_app_occurrences,
     _google_request_json_with_retry,
 )
-from integrations.models import EventSyncMap, GoogleCalendarConnection
+from integrations.models import EventSyncMap, GoogleCalendarConnection, GoogleCalendarWatch
 from tracker.models import Task, TaskOccurrence, Habit
 from integrations.rrule_handler import RRuleHandler
 
@@ -128,7 +131,7 @@ class RecurringTaskSyncTests(TestCase):
         self.assertEqual(payload["reminders"]["overrides"][0]["method"], "popup")
         self.assertEqual(payload["reminders"]["overrides"][0]["minutes"], 15)
 
-    @patch('integrations.services._google_request_json')
+    @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services.ensure_valid_access_token')
     def test_sync_parent_reminders_to_google_pushes_google_reminders(self, mock_token, mock_request):
         mock_token.return_value = "access_token"
@@ -154,6 +157,101 @@ class RecurringTaskSyncTests(TestCase):
         payload = mock_request.call_args[0][3]
         self.assertFalse(payload["reminders"]["useDefault"])
         self.assertEqual(len(payload["reminders"]["overrides"]), 2)
+
+    @patch('integrations.services._google_request_json_with_retry')
+    def test_google_list_events_uses_verified_at_for_initial_sync(self, mock_request):
+        self.user.verified_at = timezone.make_aware(datetime(2026, 1, 2, 3, 4, 5))
+        self.user.save(update_fields=["verified_at", "updated_at"])
+        mock_request.return_value = {"items": []}
+
+        google_list_events("access_token", user=self.user)
+
+        url = mock_request.call_args[0][1]
+        expected = urllib.parse.quote(self.user.verified_at.astimezone(dt_timezone.utc).isoformat())
+        self.assertIn(f"timeMin={expected}", url)
+
+    @patch('integrations.services.google_list_events')
+    @patch('integrations.services.ensure_valid_access_token')
+    def test_pull_google_delta_for_watch_passes_user(self, mock_token, mock_list_events):
+        mock_token.return_value = ("access_token", "")
+        mock_list_events.return_value = {"items": [], "nextSyncToken": "sync_123"}
+        watch = GoogleCalendarWatch.objects.create(
+            user=self.user,
+            calendar_id="primary",
+            channel_id="channel_123",
+            resource_id="resource_123",
+            sync_token=None,
+            is_active=True,
+        )
+
+        result = pull_google_delta_for_watch(watch)
+
+        self.assertEqual(result["next_sync_token"], "sync_123")
+        self.assertEqual(mock_list_events.call_args.kwargs["user"], self.user)
+
+    @patch('integrations.services._google_request_json_with_retry')
+    @patch('integrations.services.ensure_valid_access_token')
+    def test_sync_parent_reminders_to_google_uses_etag(self, mock_token, mock_request):
+        mock_token.return_value = "access_token"
+        mock_request.return_value = {"etag": "etag_after_patch"}
+
+        task = Task.objects.create(
+            user=self.user,
+            title="Reminder ETag",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            reminder_enabled=True,
+            reminder_offset=[{"value": 1, "unit": "hours", "modes": ["push", "email"]}],
+            google_event_id="google_push_event_2",
+        )
+        EventSyncMap.objects.create(
+            user=self.user,
+            local_occurrence_id=task.id,
+            local_parent_type="task",
+            local_task_id=task.id,
+            google_event_id=task.google_event_id,
+            calendar_id="primary",
+            google_etag="etag_before_patch",
+        )
+
+        result = sync_parent_reminders_to_google(self.user, task)
+
+        self.assertTrue(result["synced"])
+        self.assertEqual(mock_request.call_args.kwargs["extra_headers"], {"If-Match": "etag_before_patch"})
+
+    def test_duration_config_is_normalized_on_save_for_task_and_habit(self):
+        task = Task.objects.create(
+            user=self.user,
+            title="Duration Task",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            duration_config={"value": 45, "unit": "minutes", "mode": "email"},
+        )
+        habit = Habit.objects.create(
+            user=self.user,
+            title="Duration Habit",
+            section="personal",
+            status="active",
+            frequency_type="daily",
+            frequency_interval=1,
+            start_date=date(2026, 6, 8),
+            start_time=datetime.strptime("11:00:00", "%H:%M:%S").time(),
+            duration_config={"value": 20, "unit": "minutes", "mode": "push"},
+        )
+
+        task.refresh_from_db()
+        habit.refresh_from_db()
+
+        self.assertEqual(task.duration_config, {"value": 45, "unit": "minutes"})
+        self.assertEqual(habit.duration_config, {"value": 20, "unit": "minutes"})
     
     @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')
@@ -356,7 +454,9 @@ class GoogleRecurringPullTests(TestCase):
 
         occurrences = TaskOccurrence.objects.filter(task=task).order_by("scheduled_date")
         self.assertEqual(occurrences.count(), 3)
-        self.assertEqual(occurrences.first().google_recurrence_id, "20260605T090000Z")
+        first_occurrence = occurrences.first()
+        expected_first = first_occurrence.scheduled_date.strftime("%Y%m%dT") + first_occurrence.scheduled_time.strftime("%H%M%SZ")
+        self.assertEqual(first_occurrence.google_recurrence_id, expected_first)
 
         mapping = EventSyncMap.objects.get(user=self.user, google_event_id="google_series_123")
         self.assertTrue(mapping.is_recurring)

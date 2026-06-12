@@ -140,6 +140,13 @@ def ensure_valid_access_token(connection: GoogleCalendarConnection) -> str:
     connection.save(update_fields=["access_token", "token_expiry", "scope", "updated_at"])
     return access_token, token_data.get("error_description", "")
 
+def _coerce_access_token_result(result) -> tuple[str, str]:
+    if isinstance(result, tuple):
+        if len(result) >= 2:
+            return result[0], result[1] or ""
+        if len(result) == 1:
+            return result[0], ""
+    return result or "", ""
 
 def _google_request_json(method: str, url: str, access_token: str, data: dict | None = None) -> dict:
     return _google_request_json_with_retry(method, url, access_token, data)
@@ -274,7 +281,7 @@ def ensure_watch(user, calendar_id: str = "primary") -> GoogleCalendarWatch:
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
     if not connection:
         raise ValueError("Google Calendar not connected")
-    access_token, error = ensure_valid_access_token(connection)
+    access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
         raise ValueError(f"Access token error: {error}")
     channel_id = secrets.token_urlsafe(24)
@@ -453,15 +460,23 @@ def sync_parent_reminders_to_google(user, parent, calendar_id: str = "primary") 
     if not getattr(parent, "google_event_id", None):
         return {"synced": False, "reason": "missing_google_event_id"}
 
-    access_token, error = ensure_valid_access_token(connection)
+    access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
         return {"synced": False, "reason": f"access_token_error: {error}"}
     encoded_calendar = urllib.parse.quote(calendar_id, safe="")
     encoded_event = urllib.parse.quote(parent.google_event_id, safe="")
     event_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/{encoded_event}"
     payload = {"reminders": _build_google_reminders_payload(parent)}
+    mapping = EventSyncMap.objects.filter(user=user, calendar_id=calendar_id, google_event_id=parent.google_event_id).first()
+    extra_headers = {"If-Match": mapping.google_etag} if mapping and mapping.google_etag else None
 
-    res = _google_request_json("PATCH", event_url, access_token, payload)
+    res = _google_request_json_with_retry("PATCH", event_url, access_token, payload, extra_headers=extra_headers)
+    if mapping:
+        mapping.etag = res.get("etag")
+        mapping.google_etag = res.get("etag")
+        mapping.last_google_updated_at = dj_timezone.now()
+        mapping.save(update_fields=["etag", "google_etag", "last_google_updated_at", "updated_at"])
+
     return {
         "synced": True,
         "google_event_id": parent.google_event_id,
@@ -536,10 +551,10 @@ def pull_google_delta_for_watch(watch: GoogleCalendarWatch) -> dict:
     connection = GoogleCalendarConnection.objects.filter(user=watch.user, is_active=True).first()
     if not connection:
         raise ValueError("Google Calendar connection not found")
-    access_token, error = ensure_valid_access_token(connection)
+    access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
         return {"synced": False, "reason": f"access_token_error: {error}"}
-    data = google_list_events(access_token, calendar_id=watch.calendar_id, sync_token=watch.sync_token)
+    data = google_list_events(access_token, calendar_id=watch.calendar_id, sync_token=watch.sync_token, user=watch.user)
     items = data.get("items", [])
     changed = upsert_mirror_events(watch.user, watch.calendar_id, items)
     
@@ -1071,7 +1086,7 @@ def handle_recurring_occurrence_change(user, occurrence, action: str, calendar_i
     if not connection:
         return {"pushed": False, "reason": "not_connected"}
 
-    access_token, error = ensure_valid_access_token(connection)
+    access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
         return {"pushed": False, "reason": f"access_token_error: {error}"}
     instance = _find_google_recurring_instance(access_token, calendar_id, parent, occurrence)
@@ -1203,7 +1218,7 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
         return {"created": False, "error": "Google Calendar not connected"}
     
     try:
-        access_token, error = ensure_valid_access_token(connection)
+        access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
         if error:
             return {"created": False, "error": f"Access token error: {error}"}
         was_existing_event = bool(task.google_event_id)
@@ -1328,7 +1343,7 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
     if not connection:
         return {"pushed": False, "reason": "not_connected"}
-    access_token, error = ensure_valid_access_token(connection)
+    access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
         return {"pushed": False, "reason": f"access_token_error: {error}"}
     title = (occurrence.task.title if occurrence.task_id else occurrence.habit.title) if (occurrence.task_id or occurrence.habit_id) else "Event"
