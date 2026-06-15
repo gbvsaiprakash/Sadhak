@@ -16,9 +16,12 @@ from integrations.services import (
     create_recurring_google_event,
     google_list_events,
     pull_google_delta_for_watch,
+    push_local_occurrence_change,
+    sync_parent_occurrences_to_google,
     sync_google_recurring_to_app,
     sync_google_recurring_change,
     delete_task_occurrence_in_app,
+    delete_parent_from_google,
     _update_rrule_until_date,
     sync_external_google_event_to_app,
     sync_parent_reminders_to_google,
@@ -27,6 +30,7 @@ from integrations.services import (
 )
 from integrations.models import EventSyncMap, GoogleCalendarConnection, GoogleCalendarWatch
 from tracker.models import Task, TaskOccurrence, Habit
+from tracker.services.occurrence import ensure_future_occurrences
 from integrations.rrule_handler import RRuleHandler
 
 logger = logging.getLogger(__name__)
@@ -252,6 +256,201 @@ class RecurringTaskSyncTests(TestCase):
 
         self.assertEqual(task.duration_config, {"value": 45, "unit": "minutes"})
         self.assertEqual(habit.duration_config, {"value": 20, "unit": "minutes"})
+
+    def test_ensure_future_occurrences_skips_google_imported_habits(self):
+        habit = Habit.objects.create(
+            user=self.user,
+            title="Google Habit",
+            section="personal",
+            status="active",
+            frequency_type="daily",
+            frequency_interval=1,
+            start_date=date(2026, 6, 8),
+            start_time=datetime.strptime("11:00:00", "%H:%M:%S").time(),
+            external_google_id=True,
+            google_event_id="google_habit_1",
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260630",
+        )
+
+        result = ensure_future_occurrences(habit)
+
+        self.assertEqual(result, [])
+        self.assertEqual(TaskOccurrence.objects.filter(habit=habit).count(), 0)
+
+    @patch('integrations.services._google_request_no_content')
+    @patch('integrations.services.ensure_valid_access_token')
+    def test_delete_parent_from_google_deletes_recurring_root(self, mock_token, mock_delete):
+        mock_token.return_value = "access_token"
+
+        task = Task.objects.create(
+            user=self.user,
+            title="Delete Root",
+            section="personal",
+            status="pending",
+            frequency_type="daily",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260630",
+            google_event_id="root_series_delete",
+        )
+        EventSyncMap.objects.create(
+            user=self.user,
+            local_occurrence_id=task.id,
+            local_parent_type="task",
+            local_task_id=task.id,
+            google_event_id=task.google_event_id,
+            calendar_id="primary",
+            google_etag="etag_root_delete",
+            is_recurring=True,
+            recurrence_rule=task.recurrence_rule,
+        )
+
+        result = delete_parent_from_google(self.user, task)
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(mock_delete.call_count, 1)
+
+    @patch('integrations.services.delete_google_event_from_calendar')
+    def test_delete_parent_from_google_deletes_non_recurring_occurrences(self, mock_delete):
+        task = Task.objects.create(
+            user=self.user,
+            title="Delete Children",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+        )
+        occ1 = TaskOccurrence.objects.create(task=task, scheduled_date=date(2026, 6, 8), scheduled_time=datetime.strptime("10:00:00", "%H:%M:%S").time(), status="pending")
+        occ2 = TaskOccurrence.objects.create(task=task, scheduled_date=date(2026, 6, 9), scheduled_time=datetime.strptime("10:00:00", "%H:%M:%S").time(), status="pending")
+        EventSyncMap.objects.create(
+            user=self.user,
+            local_occurrence_id=occ1.id,
+            local_parent_type="task",
+            google_event_id="google_delete_1",
+            calendar_id="primary",
+        )
+        EventSyncMap.objects.create(
+            user=self.user,
+            local_occurrence_id=occ2.id,
+            local_parent_type="task",
+            google_event_id="google_delete_2",
+            calendar_id="primary",
+        )
+        mock_delete.return_value = {"deleted": True, "google_event_id": "google_delete_1"}
+
+        result = delete_parent_from_google(self.user, task)
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["deleted_occurrences"], 2)
+        self.assertEqual(mock_delete.call_count, 2)
+
+    @patch('integrations.services.push_local_occurrence_change')
+    def test_sync_parent_occurrences_to_google_pushes_one_off_task(self, mock_push):
+        task = Task.objects.create(
+            user=self.user,
+            title="One Off",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+        )
+        TaskOccurrence.objects.create(
+            task=task,
+            scheduled_date=date(2026, 6, 8),
+            scheduled_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            status="pending",
+        )
+        mock_push.return_value = {"pushed": True}
+
+        result = sync_parent_occurrences_to_google(self.user, task)
+
+        self.assertTrue(result["synced"])
+        self.assertEqual(result["pushed_occurrences"], 1)
+        self.assertEqual(mock_push.call_count, 1)
+
+    @patch('integrations.services._google_request_json')
+    @patch('integrations.services.ensure_valid_access_token')
+    def test_push_local_occurrence_change_uses_ist_timezone(self, mock_token, mock_request):
+        mock_token.return_value = "access_token"
+        mock_request.return_value = {"id": "google_ist_event", "etag": "etag_ist"}
+
+        task = Task.objects.create(
+            user=self.user,
+            title="IST Event",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+        )
+        occurrence = TaskOccurrence.objects.create(
+            task=task,
+            scheduled_date=date(2026, 6, 8),
+            scheduled_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            schedule_end_time=datetime.strptime("10:30:00", "%H:%M:%S").time(),
+            status="pending",
+        )
+
+        result = push_local_occurrence_change(self.user, occurrence, action="create")
+
+        self.assertTrue(result["pushed"])
+        payload = mock_request.call_args[0][3]
+        self.assertEqual(payload["start"]["timeZone"], "Asia/Kolkata")
+        self.assertEqual(payload["end"]["timeZone"], "Asia/Kolkata")
+        self.assertTrue(payload["start"]["dateTime"].endswith("+05:30"))
+        self.assertTrue(payload["end"]["dateTime"].endswith("+05:30"))
+
+    @patch('integrations.services.delete_google_event_from_calendar')
+    @patch('integrations.services.push_local_occurrence_change')
+    def test_sync_parent_occurrences_to_google_deletes_soft_deleted_occurrences(self, mock_push, mock_delete):
+        task = Task.objects.create(
+            user=self.user,
+            title="Duration Change",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+        )
+        old_occurrence = TaskOccurrence.objects.create(
+            task=task,
+            scheduled_date=date(2026, 6, 8),
+            scheduled_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            status="pending",
+            is_deleted=True,
+        )
+        new_occurrence = TaskOccurrence.objects.create(
+            task=task,
+            scheduled_date=date(2026, 6, 9),
+            scheduled_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            status="pending",
+        )
+        EventSyncMap.objects.create(
+            user=self.user,
+            local_occurrence_id=old_occurrence.id,
+            local_parent_type="task",
+            google_event_id="google_old_duration",
+            calendar_id="primary",
+            google_etag="etag_old",
+            is_deleted=False,
+        )
+        mock_delete.return_value = {"deleted": True, "google_event_id": "google_old_duration"}
+        mock_push.return_value = {"pushed": True}
+
+        result = sync_parent_occurrences_to_google(self.user, task)
+
+        self.assertTrue(result["synced"])
+        self.assertEqual(result["deleted_occurrences"], 1)
+        self.assertEqual(result["pushed_occurrences"], 1)
+        self.assertEqual(mock_delete.call_count, 1)
+        self.assertEqual(mock_push.call_count, 1)
     
     @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')

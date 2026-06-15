@@ -7,7 +7,7 @@ from tracker.serializers import TaskDetailSerializer, TaskListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, mark_occurrence, sync_task_status_from_occurrences
 from tracker.views.mixins import TrackerAPIViewMixin
 from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
-from integrations.services import delete_task_occurrence_in_app
+from integrations.services import delete_task_occurrence_in_app, delete_parent_from_google
 
 
 class TaskBaseAPIView(TrackerAPIViewMixin):
@@ -110,6 +110,7 @@ class TaskDetailAPIView(TaskBaseAPIView):
 
     def delete(self, request, pk):
         task = self.get_task(pk)
+        delete_parent_from_google(task.user, task, calendar_id="primary")
         self.delete_task(task)
         return Response(status=status.HTTP_204_NO_CONTENT)
 

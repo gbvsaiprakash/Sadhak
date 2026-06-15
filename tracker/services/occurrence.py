@@ -573,6 +573,38 @@ def generate_occurrences(entity, from_date=None, to_date=None):
     return payloads
 
 
+def ensure_future_occurrences(entity, horizon_days: int = 90):
+    """
+    Top up future generated occurrences without relying on a read request.
+    Skips Google-imported entities so background maintenance doesn't fight
+    Google as the source of truth.
+    """
+    if getattr(entity, "external_google_id", False):
+        return []
+    if getattr(entity, "is_deleted", False):
+        return []
+
+    status = getattr(entity, "status", None)
+    if status not in {"active", "pending"}:
+        return []
+
+    today = timezone.localdate()
+    horizon_end = today + timedelta(days=horizon_days)
+
+    filters = _occurrence_model_fields(entity)
+    upcoming = TaskOccurrence.objects.filter(
+        **filters,
+        is_deleted=False,
+        status="pending",
+        scheduled_date__gte=today,
+    ).order_by("-scheduled_date")
+
+    last_scheduled = upcoming.values_list("scheduled_date", flat=True).first()
+    if not last_scheduled:
+        return generate_occurrences(entity, from_date=today, to_date=horizon_end)
+    if last_scheduled < horizon_end:
+        return generate_occurrences(entity, from_date=last_scheduled + timedelta(days=1), to_date=horizon_end)
+    return []
 
 @transaction.atomic
 def regenerate_future_occurrences(entity, from_date=None):

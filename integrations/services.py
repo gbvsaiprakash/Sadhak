@@ -443,6 +443,19 @@ def _build_google_reminders_payload(parent_or_occurrence) -> dict:
     return {"useDefault": False, "overrides": overrides}
 
 
+def _google_time_zone_name() -> str:
+    return dj_timezone.get_current_timezone_name() or "Asia/Kolkata"
+
+
+def _google_date_time_payload(date_value, time_value) -> tuple[str, str]:
+    local_time = time_value or time(0, 0)
+    aware_dt = dj_timezone.make_aware(
+        datetime.combine(date_value, local_time),
+        dj_timezone.get_current_timezone(),
+    )
+    return aware_dt.isoformat(), _google_time_zone_name()
+
+
 def _occurrence_due_dt(occurrence):
     from datetime import datetime, time as dt_time
 
@@ -483,6 +496,149 @@ def sync_parent_reminders_to_google(user, parent, calendar_id: str = "primary") 
         "etag": res.get("etag"),
     }
 
+
+
+def delete_google_event_from_calendar(user, google_event_id: str, calendar_id: str = "primary", google_etag: str | None = None) -> dict:
+    connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
+    if not connection:
+        return {"deleted": False, "reason": "not_connected"}
+
+    access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
+    if error:
+        return {"deleted": False, "reason": f"access_token_error: {error}"}
+
+    encoded_calendar = urllib.parse.quote(calendar_id, safe="")
+    encoded_event = urllib.parse.quote(google_event_id, safe="")
+    delete_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/{encoded_event}"
+    extra_headers = {"If-Match": google_etag} if google_etag else None
+    try:
+        _google_request_no_content("DELETE", delete_url, access_token, extra_headers=extra_headers)
+    except Exception as exc:
+        return {"deleted": False, "reason": str(exc), "google_event_id": google_event_id}
+
+    mapping = EventSyncMap.objects.filter(user=user, calendar_id=calendar_id, google_event_id=google_event_id).first()
+    if mapping:
+        mapping.is_deleted = True
+        mapping.last_google_updated_at = dj_timezone.now()
+        mapping.save(update_fields=["is_deleted", "last_google_updated_at", "updated_at"])
+
+    return {"deleted": True, "google_event_id": google_event_id}
+
+
+def delete_parent_from_google(user, parent, calendar_id: str = "primary") -> dict:
+    """
+    Remove a task/habit from Google Calendar when the parent is deleted in-app.
+    Recurring parents delete their root event; non-recurring parents delete
+    each mirrored occurrence.
+    """
+    if not parent:
+        return {"deleted": False, "reason": "missing_parent"}
+
+    parent_event_id = getattr(parent, "google_event_id", None)
+    if getattr(parent, "recurrence_rule", None) and parent_event_id:
+        mapping = EventSyncMap.objects.filter(user=user, calendar_id=calendar_id, google_event_id=parent_event_id).first()
+        result = delete_google_event_from_calendar(
+            user,
+            parent_event_id,
+            calendar_id=calendar_id,
+            google_etag=getattr(mapping, "google_etag", None),
+        )
+        if result.get("deleted"):
+            EventSyncMap.objects.filter(user=user, calendar_id=calendar_id, google_event_id=parent_event_id).update(
+                is_deleted=True,
+                last_google_updated_at=dj_timezone.now(),
+            )
+        return result
+
+    from tracker.models import TaskOccurrence
+
+    occurrence_filters = {"task": parent} if getattr(parent, "is_habit", False) is False else {"habit": parent}
+    deleted_count = 0
+    for occurrence in TaskOccurrence.objects.filter(**occurrence_filters).order_by("scheduled_date", "scheduled_time", "created_at"):
+        mapping = EventSyncMap.objects.filter(
+            user=user,
+            calendar_id=calendar_id,
+            local_occurrence_id=occurrence.id,
+        ).first()
+        google_event_id = getattr(mapping, "google_event_id", None) or getattr(occurrence, "google_event_id", None)
+        google_etag = getattr(mapping, "google_etag", None)
+        if not google_event_id:
+            continue
+        if mapping and mapping.is_deleted:
+            continue
+        result = delete_google_event_from_calendar(
+            user,
+            google_event_id,
+            calendar_id=calendar_id,
+            google_etag=google_etag,
+        )
+        if result.get("deleted"):
+            deleted_count += 1
+
+    return {"deleted": True, "deleted_occurrences": deleted_count, "parent_type": "habit" if getattr(parent, "is_habit", False) else "task"}
+
+
+def _delete_soft_deleted_parent_occurrences_from_google(user, parent, calendar_id: str = "primary") -> int:
+    """
+    Remove Google events that belong to soft-deleted local occurrences.
+
+    This prevents schedule edits that regenerate occurrences from leaving the
+    old Google events behind as duplicates.
+    """
+    if not parent:
+        return 0
+
+    from tracker.models import TaskOccurrence
+
+    occurrence_filters = {"task": parent} if getattr(parent, "is_habit", False) is False else {"habit": parent}
+    deleted_count = 0
+    for occurrence in TaskOccurrence.objects.filter(**occurrence_filters, is_deleted=True).order_by("scheduled_date", "scheduled_time", "created_at"):
+        mapping = EventSyncMap.objects.filter(
+            user=user,
+            calendar_id=calendar_id,
+            local_occurrence_id=occurrence.id,
+        ).first()
+        google_event_id = getattr(mapping, "google_event_id", None) or getattr(occurrence, "google_event_id", None)
+        google_etag = getattr(mapping, "google_etag", None)
+        if not google_event_id:
+            continue
+        if mapping and mapping.is_deleted:
+            continue
+
+        result = delete_google_event_from_calendar(
+            user,
+            google_event_id,
+            calendar_id=calendar_id,
+            google_etag=google_etag,
+        )
+        if result.get("deleted"):
+            deleted_count += 1
+
+    return deleted_count
+
+def sync_parent_occurrences_to_google(user, parent, calendar_id: str = "primary") -> dict:
+    """
+    Push one-off app-generated occurrences to Google after they are generated.
+    Recurring parents are skipped because their Google root event is the source
+    of truth.
+    """
+    if not parent:
+        return {"synced": False, "reason": "missing_parent"}
+    if getattr(parent, "recurrence_rule", None):
+        return {"synced": False, "reason": "recurring_parent"}
+    if getattr(parent, "external_google_id", False) or getattr(parent, "synced_from_google", False):
+        return {"synced": False, "reason": "google_source_of_truth"}
+
+    from tracker.models import TaskOccurrence
+
+    occurrence_filters = {"task": parent} if getattr(parent, "is_habit", False) is False else {"habit": parent}
+    synced = 0
+    deleted_count = _delete_soft_deleted_parent_occurrences_from_google(user, parent, calendar_id=calendar_id)
+    for occurrence in TaskOccurrence.objects.filter(**occurrence_filters, is_deleted=False).order_by("scheduled_date", "scheduled_time"):
+        result = push_local_occurrence_change(user, occurrence, action="create", calendar_id=calendar_id)
+        if result.get("pushed"):
+            synced += 1
+    return {"synced": True,  "deleted_occurrences": deleted_count, "pushed_occurrences": synced}
 
 def sync_google_notifications_to_app(user, google_event: dict, parent=None, occurrence=None) -> dict:
     from tracker.models import TaskOccurrence
@@ -1224,12 +1380,8 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
         was_existing_event = bool(task.google_event_id)
         
         # Prepare event payload with recurrence
-        tz = "UTC"
-        date_str = task.start_date.isoformat()
-        start_time = task.start_time.isoformat() if task.start_time else "00:00:00"
-        end_time = task.end_time.isoformat() if task.end_time else start_time
-        start_iso = f"{date_str}T{start_time}+00:00"
-        end_iso = f"{date_str}T{end_time}+00:00"
+        start_iso, tz = _google_date_time_payload(task.start_date, task.start_time)
+        end_iso, _ = _google_date_time_payload(task.start_date, task.end_time or task.start_time)
         
         # Convert RRULE to Google's recurrence format (list with "RRULE:" prefix)
         google_recurrence = RRuleHandler.rrule_to_google_event_recurrence(task.recurrence_rule)
@@ -1347,12 +1499,15 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
     if error:
         return {"pushed": False, "reason": f"access_token_error: {error}"}
     title = (occurrence.task.title if occurrence.task_id else occurrence.habit.title) if (occurrence.task_id or occurrence.habit_id) else "Event"
-    tz = "UTC"
-    date_str = occurrence.scheduled_date.isoformat()
-    start_time = occurrence.scheduled_time.isoformat() if occurrence.scheduled_time else "00:00:00"
-    end_time = occurrence.schedule_end_time.isoformat() if occurrence.schedule_end_time else start_time
-    start_iso = f"{date_str}T{start_time}+00:00"
-    end_iso = f"{date_str}T{end_time}+00:00"
+    # tz = "IST"
+    # date_str = occurrence.scheduled_date.isoformat()
+    # start_time = occurrence.scheduled_time.isoformat() if occurrence.scheduled_time else "00:00:00"
+    # end_time = occurrence.schedule_end_time.isoformat() if occurrence.schedule_end_time else start_time
+    # start_iso = f"{date_str}T{start_time}+00:00"
+    # end_iso = f"{date_str}T{end_time}+00:00"
+    start_iso, tz = _google_date_time_payload(occurrence.scheduled_date, occurrence.scheduled_time)
+    end_iso, _ = _google_date_time_payload(occurrence.scheduled_date, occurrence.schedule_end_time or occurrence.scheduled_time)
+    
     
     # Map occurrence status to Google status
     google_status, extended_props = _map_app_status_to_google(occurrence.status)

@@ -5,8 +5,9 @@ from datetime import datetime, timedelta
 from .models import DomainEvent  # adjust if path differs
 from tracker.models.occurrence import OccurrenceReminder
 from sadhak_base.notifications import can_send_notification, send_notification, NotificationRetryableError
-from tracker.services.occurrence import emit_due_reminder_events, _occurrence_due_dt
+from tracker.services.occurrence import emit_due_reminder_events, _occurrence_due_dt, ensure_future_occurrences
 from sadhak.app_settings import POST_DUE_GRACE_MIN
+from tracker.models import Task, Habit
 
 
 REMINDER_EVENTS = {"task.reminder_due", "habit.reminder_due"}
@@ -135,3 +136,26 @@ def process_pending_domain_events(batch_size: int = 200):
     for event_id in pending_ids:
         process_domain_event.delay(str(event_id))
     return len(pending_ids)
+
+
+@shared_task
+def refresh_future_occurrences_task(horizon_days: int = 90, batch_size: int = 200):
+    """
+    Keep app-generated recurring schedules topped up in the background.
+    This avoids any write side-effects in GET handlers.
+    """
+    refreshed = 0
+    active_tasks = Task.objects.filter(
+        is_deleted=False,
+        external_google_id=False,
+    ).exclude(frequency_type="once").order_by("created_at")
+    active_habits = Habit.objects.filter(
+        is_deleted=False,
+        external_google_id=False,
+        status="active",
+    ).order_by("created_at")
+
+    for entity in list(active_tasks[:batch_size]) + list(active_habits[:batch_size]):
+        ensure_future_occurrences(entity, horizon_days=horizon_days)
+        refreshed += 1
+    return refreshed

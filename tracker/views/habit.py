@@ -7,7 +7,7 @@ from tracker.serializers import HabitDetailSerializer, HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, generate_occurrences, mark_occurrence
 from tracker.views.mixins import TrackerAPIViewMixin
 from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
-from integrations.services import delete_habit_occurrence_in_app
+from integrations.services import delete_habit_occurrence_in_app, delete_parent_from_google
 
 
 class HabitBaseAPIView(TrackerAPIViewMixin):
@@ -44,35 +44,35 @@ class HabitBaseAPIView(TrackerAPIViewMixin):
         if habit.goal:
             check_goal_completion(habit.goal)
     
-    def _ensure_future_occurrences(self, habit):
-        if habit.is_deleted or habit.status != "active" or habit.end_date is not None:
-            return
+    # def _ensure_future_occurrences(self, habit):
+    #     if habit.is_deleted or habit.status != "active" or habit.end_date is not None:
+    #         return
 
-        today = timezone.localdate()
-        horizon_end = today + timedelta(days=90)
+    #     today = timezone.localdate()
+    #     horizon_end = today + timedelta(days=90)
 
-        has_upcoming_pending = TaskOccurrence.objects.filter(
-            habit_id=habit.id,
-            is_deleted=False,
-            status="pending",
-            scheduled_date__gte=today,
-        )
+    #     has_upcoming_pending = TaskOccurrence.objects.filter(
+    #         habit_id=habit.id,
+    #         is_deleted=False,
+    #         status="pending",
+    #         scheduled_date__gte=today,
+    #     )
 
-        last_scheduled = has_upcoming_pending.order_by("-scheduled_date").values_list("scheduled_date", flat=True).first()
+    #     last_scheduled = has_upcoming_pending.order_by("-scheduled_date").values_list("scheduled_date", flat=True).first()
         
-        if not last_scheduled:
-            generate_occurrences(
-                habit,
-                from_date=today,
-                to_date=horizon_end,
-            )
+    #     if not last_scheduled:
+    #         generate_occurrences(
+    #             habit,
+    #             from_date=today,
+    #             to_date=horizon_end,
+    #         )
         
-        if last_scheduled and last_scheduled < horizon_end:
-            generate_occurrences(
-                habit,
-                from_date=last_scheduled + timedelta(days=1),
-                to_date=horizon_end,
-            )
+    #     if last_scheduled and last_scheduled < horizon_end:
+    #         generate_occurrences(
+    #             habit,
+    #             from_date=last_scheduled + timedelta(days=1),
+    #             to_date=horizon_end,
+    #         )
 
 class HabitDependencyCandidatesAPIView(HabitBaseAPIView):
     def get(self, request, pk):
@@ -94,9 +94,9 @@ class HabitListAPIView(HabitBaseAPIView):
         return self.list_serializer_class
 
     def get(self, request):
-        habits = list(self.get_queryset())
-        for h in habits:
-            self._ensure_future_occurrences(h)
+        # habits = list(self.get_queryset())
+        # for h in habits:
+        #     self._ensure_future_occurrences(h)
         serializer = self.get_serializer(self.get_queryset(), many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -132,6 +132,7 @@ class HabitDetailAPIView(HabitBaseAPIView):
 
     def delete(self, request, pk):
         habit = self.get_habit(pk)
+        delete_parent_from_google(habit.user, habit, calendar_id="primary")
         self.stop_habit(habit, is_deleted=True)
         habit.is_deleted = True
         habit.save(update_fields=["is_deleted", "updated_at"])

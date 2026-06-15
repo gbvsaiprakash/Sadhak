@@ -151,6 +151,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
+    "EXCEPTION_HANDLER": "rest_framework.views.exception_handler",
 }
 CACHES = {
     "default": {
@@ -158,6 +159,10 @@ CACHES = {
         "LOCATION": os.getenv("RENDER_REDIS"),
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "SOCKET_CONNECT_TIMEOUT": 2,  # Give up after 2 seconds
+            "SOCKET_TIMEOUT": 2,          # Don't freeze the view
+            "IGNORE_EXCEPTIONS": True,     # <--- THIS IS MAGIC. It skips Redis errors!
+            # "CONNECTION_POOL_KWARGS": {"max_connections": 20},
         },
     }
 }
@@ -256,6 +261,9 @@ CELERY_TASK_SERIALIZER = "json"
 # CELERY_RESULT_SERIALIZER = "json"
 CELERY_WORKER_ENABLE_REMOTE_CONTROL = False
 CELERY_TASK_IGNORE_RESULT = True
+CELERY_BROKER_CONNECTION_RETRY_ON_START = True
+CELERY_BROKER_CONNECTION_TIMEOUT = 4  # Stop waiting after 4 seconds
+
 
 
 from celery.schedules import crontab
@@ -269,6 +277,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "sadhak_base.tasks.process_pending_domain_events",
         "schedule": crontab(minute="*"),
         "kwargs": {"batch_size": 200},
+    },
+     "refresh-future-occurrences-hourly": {
+        "task": "sadhak_base.tasks.refresh_future_occurrences_task",
+        "schedule": crontab(minute="0"),
+        "kwargs": {"horizon_days": 90, "batch_size": 200},
     },
     "emit-due-expense-report-events-every-5-minutes": {
         "task": "expenses.tasks.emit_due_expense_report_events_task",
