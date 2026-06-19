@@ -1,5 +1,7 @@
 from rest_framework import status
 from rest_framework.response import Response
+from django.db import transaction
+from datetime import timedelta
 from django.utils import timezone
 from tracker.models import Task, TaskOccurrence
 from tracker.models.occurrence import OccurrenceReminder
@@ -7,7 +9,8 @@ from tracker.serializers import TaskDetailSerializer, TaskListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, mark_occurrence, sync_task_status_from_occurrences
 from tracker.views.mixins import TrackerAPIViewMixin
 from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
-from integrations.services import delete_task_occurrence_in_app, delete_parent_from_google
+from integrations.services import _update_rrule_until_date
+from integrations.tasks import delete_parent_from_google_task, push_occurrence_to_google_task, sync_recurring_parent_to_google_task
 
 
 class TaskBaseAPIView(TrackerAPIViewMixin):
@@ -110,8 +113,8 @@ class TaskDetailAPIView(TaskBaseAPIView):
 
     def delete(self, request, pk):
         task = self.get_task(pk)
-        delete_parent_from_google(task.user, task, calendar_id="primary")
         self.delete_task(task)
+        transaction.on_commit(lambda: delete_parent_from_google_task.delay("task", str(task.id), str(task.user.user_id), "primary"))
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 class TaskCancelAPIView(TaskBaseAPIView):
@@ -143,6 +146,7 @@ class TaskCompleteAPIView(TaskBaseAPIView):
             override_reason = request.data.get("override_reason")
             mark_occurrence(task, occurrence, "completed", notes=notes, override_dependency=override_dependency, override_reason=override_reason)
             sync_task_status_from_occurrences(task)
+            transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(task.user.user_id), "primary"))
         else:
             task.status = "completed"
             task.save(update_fields=["status", "updated_at"])
@@ -160,10 +164,28 @@ class TaskSkipAPIView(TaskBaseAPIView):
         if occurrence is None:
             return self.finalize_error("TASK_NOT_FOUND", "Task occurrence was not found.")
         if task.recurrence_rule and request.data.get("delete_all_future") is not None:
-            delete_task_occurrence_in_app(
-                occurrence,
-                delete_all_future=bool(request.data.get("delete_all_future")),
-            )
+            delete_all_future = bool(request.data.get("delete_all_future"))
+            if delete_all_future:
+                task.recurrence_rule = _update_rrule_until_date(
+                    task.recurrence_rule,
+                    occurrence.scheduled_date - timedelta(days=1),
+                )
+                if task.end_date is None or task.end_date >= occurrence.scheduled_date:
+                    task.end_date = occurrence.scheduled_date - timedelta(days=1)
+                task.save(update_fields=["recurrence_rule", "end_date", "updated_at"])
+                task.occurrences.filter(
+                    scheduled_date__gte=occurrence.scheduled_date,
+                    is_deleted=False,
+                ).update(status="skipped", updated_at=timezone.now())
+                OccurrenceReminder.objects.filter(
+                    occurrence__task=task,
+                    occurrence__scheduled_date__gte=occurrence.scheduled_date,
+                    is_deleted=False,
+                ).update(is_deleted=True, updated_at=timezone.now())
+                transaction.on_commit(lambda: sync_recurring_parent_to_google_task.delay("task", str(task.id), str(task.user.user_id), "primary"))
+            else:
+                mark_occurrence(task, occurrence, "skipped", notes=request.data.get("notes"))
+                transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(task.user.user_id), "primary"))
             sync_task_status_from_occurrences(task)
             if task.milestone:
                 check_milestone_completion(task.milestone)
@@ -172,6 +194,7 @@ class TaskSkipAPIView(TaskBaseAPIView):
             return Response(self.detail_serializer_class(task, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
         mark_occurrence(task, occurrence, "skipped", notes=request.data.get("notes"))
         sync_task_status_from_occurrences(task)
+        transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(task.user.user_id), "primary"))
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:

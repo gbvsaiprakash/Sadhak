@@ -7,10 +7,12 @@ from django.middleware.csrf import get_token
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt import state
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.shortcuts import redirect
 from integrations.models import GoogleAuthConnection, GoogleCalendarConnection
 from integrations.crypto import encrypt_token
+from integrations.tasks import sync_google_watch_task, sync_google_full_calendar_task
 from integrations.serializers import (
     GoogleOAuthStartSerializer,
     GoogleOAuthCallbackSerializer,
@@ -18,21 +20,12 @@ from integrations.serializers import (
     GoogleCalendarMirrorEventSerializer,
 )
 from integrations.services import (
-    _coerce_access_token_result,
     build_google_oauth_url,
     validate_state_and_get_mode,
     exchange_code_for_token,
     fetch_google_user_info,
-    google_list_events,
-    compute_expiry,
     ensure_watch,
-    upsert_mirror_events,
-    pull_google_delta_for_watch,
-    ensure_valid_access_token,
-    sync_google_status_to_app_occurrences,
-    sync_google_recurring_change,
-    sync_external_google_event_to_app,
-    GoogleTokenExpiredException,
+    compute_expiry,
 )
 from user_management.models import User
 from user_management.views import AuthenticatedAPIView
@@ -79,6 +72,11 @@ class GoogleOAuthStartAPIView(APIView):
         s.is_valid(raise_exception=True)
         mode = s.validated_data["mode"]
         redirect_uri = s.validated_data.get("redirect_uri") or os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+        if not redirect_uri:
+            return Response(
+                {"message": "GOOGLE_OAUTH_REDIRECT_URI is required for Google OAuth"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         auth_url, state = build_google_oauth_url(mode, redirect_uri)
         return Response({"auth_url": auth_url, "state": state}, status=status.HTTP_200_OK)
 
@@ -91,11 +89,22 @@ class GoogleOAuthCallbackAPIView(APIView):
         s.is_valid(raise_exception=True)
         code = s.validated_data["code"]
         state = s.validated_data["state"]
-        redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
-
-        mode = validate_state_and_get_mode(state)
-        if not mode:
+        
+        state_data = validate_state_and_get_mode(state)
+        if not state_data:
             return Response({"message": "Invalid or expired OAuth state"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if isinstance(state_data, dict):
+            mode = state_data.get("mode")
+            redirect_uri = state_data.get("redirect_uri") or os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+        else:
+            mode = state_data
+            redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+
+        if not mode:
+            return Response({"message": "Invalid OAuth state payload"}, status=status.HTTP_400_BAD_REQUEST)
+        if not redirect_uri:
+            return Response({"message": "Missing Google OAuth redirect URI"}, status=status.HTTP_400_BAD_REQUEST)
 
         token_data = exchange_code_for_token(code, redirect_uri)
         access_token = token_data.get("access_token")
@@ -231,71 +240,17 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
         c = GoogleCalendarConnection.objects.filter(user=request.user, is_active=True).first()
         if not c:
             return Response({"message": "Google Calendar is not connected"}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            access_token, error = _coerce_access_token_result(ensure_valid_access_token(c))
-            if error:
-                GoogleCalendarConnection.objects.filter(user=request.user).update(is_active=False)
-                request.user.google_calendar_watches.update(is_active=False)
-                return Response(
-                    {
-                        "message": "Google Calendar access token error",
-                        "detail": f"Access token error: {error}. Please reconnect your Google Calendar."
-                    },
-                    status=status.HTTP_401_UNAUTHORIZED
-                )
-        except GoogleTokenExpiredException:
-            # 1. Clear out the broken tokens so you don't keep hitting Google uselessly
-            # c.refresh_token = None
-            # c.access_token = None
-            # c.is_active = False # Or however your model tracks connection status
-            # c.save()
-            GoogleCalendarConnection.objects.filter(user=request.user).update(is_active=False)
-            request.user.google_calendar_watches.update(is_active=False)
-            
-            # 2. Return a 401 response with instructions for the frontend
-            return Response(
-                {
-                    "error": "google_reauthentication_required",
-                    "detail": "Your Google connection has expired. Please re-authenticate."
-                },
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-        
-
         watch = request.user.google_calendar_watches.filter(calendar_id=calendar_id, is_active=True).first()
         if not watch:
             watch = ensure_watch(request.user, calendar_id=calendar_id)
-
-        data = google_list_events(access_token, calendar_id=calendar_id, user=request.user)
-        items = data.get("items", [])
-        changed = upsert_mirror_events(request.user, calendar_id, items)
-        external_synced = 0
-        for item in items:
-            if item.get("recurringEventId") or item.get("recurrence"):
-                result = sync_google_recurring_change(request.user, item, calendar_id=calendar_id)
-            else:
-                result = sync_external_google_event_to_app(request.user, item, calendar_id=calendar_id)
-            if result.get("synced"):
-                external_synced += 1
-        
-        # Sync status changes from Google to app occurrences
-        status_synced = sync_google_status_to_app_occurrences(request.user, calendar_id, items)
-        
-        next_sync_token = data.get("nextSyncToken")
-        if next_sync_token:
-            watch.sync_token = next_sync_token
-            watch.save(update_fields=["sync_token", "updated_at"])
-        print(f"Full sync: fetched {len(items)} events, upserted {changed} events, synced {status_synced} statuses for user {request.user.user_id}")
+        sync_google_full_calendar_task.delay(str(request.user.user_id), calendar_id)
         return Response(
             {
-                "message": "Full sync fetched successfully",
-                "fetched_events": len(items),
-                "upserted_events": changed,
-                "external_synced": external_synced,
-                "status_synced": status_synced,
-                "next_sync_token": next_sync_token,
+                "message": "Google Calendar full sync queued",
+                "calendar_id": calendar_id,
+                "watch_id": str(watch.id),
             },
-            status=status.HTTP_200_OK,
+            status=status.HTTP_202_ACCEPTED,
         )
 
 
@@ -324,13 +279,12 @@ class GoogleCalendarWebhookAPIView(APIView):
             return Response({"message": "Watch not found"}, status=status.HTTP_404_NOT_FOUND)
 
         try:
-            result = pull_google_delta_for_watch(watch)
+            sync_google_watch_task.delay(str(watch.id))
             return Response({
                 "ok": True,
-                "changed": result.get("changed", 0),
-                "status_synced": result.get("status_synced", 0),
-                "next_sync_token": result.get("next_sync_token"),
-            }, status=status.HTTP_200_OK)
+                "message": "Google Calendar webhook queued",
+                "watch_id": str(watch.id),
+            }, status=status.HTTP_202_ACCEPTED)
         except Exception as e:
             return Response({
                 "ok": False,

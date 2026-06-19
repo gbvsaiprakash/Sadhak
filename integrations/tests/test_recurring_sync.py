@@ -373,11 +373,13 @@ class RecurringTaskSyncTests(TestCase):
         self.assertEqual(result["pushed_occurrences"], 1)
         self.assertEqual(mock_push.call_count, 1)
 
+    @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')
     @patch('integrations.services.ensure_valid_access_token')
-    def test_push_local_occurrence_change_uses_ist_timezone(self, mock_token, mock_request):
+    def test_push_local_occurrence_change_uses_ist_timezone(self, mock_token, mock_request, mock_retry_request):
         mock_token.return_value = "access_token"
         mock_request.return_value = {"id": "google_ist_event", "etag": "etag_ist"}
+        mock_retry_request.return_value = {"id": "google_ist_event", "etag": "etag_ist"}
 
         task = Task.objects.create(
             user=self.user,
@@ -451,6 +453,31 @@ class RecurringTaskSyncTests(TestCase):
         self.assertEqual(result["pushed_occurrences"], 1)
         self.assertEqual(mock_delete.call_count, 1)
         self.assertEqual(mock_push.call_count, 1)
+
+    @patch('integrations.services.push_local_occurrence_change')
+    def test_sync_parent_occurrences_to_google_returns_failed_status_on_access_token_issue(self, mock_push):
+        task = Task.objects.create(
+            user=self.user,
+            title="Token Issue",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+        )
+        TaskOccurrence.objects.create(
+            task=task,
+            scheduled_date=date(2026, 6, 8),
+            scheduled_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            status="pending",
+        )
+        mock_push.return_value = {"pushed": False, "reason": "access_token_error"}
+
+        result = sync_parent_occurrences_to_google(self.user, task)
+
+        self.assertFalse(result["synced"])
+        self.assertEqual(result["reason"], "access_token_error")
     
     @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')

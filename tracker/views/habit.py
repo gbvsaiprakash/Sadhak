@@ -1,13 +1,15 @@
 from django.utils import timezone
 from rest_framework import request, status
 from rest_framework.response import Response
+from django.db import transaction
 from datetime import timedelta
 from tracker.models import Habit, TaskOccurrence, OccurrenceReminder
 from tracker.serializers import HabitDetailSerializer, HabitListSerializer
 from tracker.services import check_goal_completion, check_milestone_completion, generate_occurrences, mark_occurrence
 from tracker.views.mixins import TrackerAPIViewMixin
 from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
-from integrations.services import delete_habit_occurrence_in_app, delete_parent_from_google
+from integrations.services import _update_rrule_until_date
+from integrations.tasks import delete_parent_from_google_task, push_occurrence_to_google_task, sync_recurring_parent_to_google_task
 
 
 class HabitBaseAPIView(TrackerAPIViewMixin):
@@ -132,10 +134,10 @@ class HabitDetailAPIView(HabitBaseAPIView):
 
     def delete(self, request, pk):
         habit = self.get_habit(pk)
-        delete_parent_from_google(habit.user, habit, calendar_id="primary")
         self.stop_habit(habit, is_deleted=True)
         habit.is_deleted = True
         habit.save(update_fields=["is_deleted", "updated_at"])
+        transaction.on_commit(lambda: delete_parent_from_google_task.delay("habit", str(habit.id), str(habit.user.user_id), "primary"))
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -179,10 +181,28 @@ class HabitLogAPIView(HabitBaseAPIView):
         if occurrence is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit occurrence was not found.")
         if habit.recurrence_rule and request.data.get("delete_all_future") is not None:
-            delete_habit_occurrence_in_app(
-                occurrence,
-                delete_all_future=bool(request.data.get("delete_all_future")),
-            )
+            delete_all_future = bool(request.data.get("delete_all_future"))
+            if delete_all_future:
+                habit.recurrence_rule = _update_rrule_until_date(
+                    habit.recurrence_rule,
+                    occurrence.scheduled_date - timedelta(days=1),
+                )
+                if habit.end_date is None or habit.end_date >= occurrence.scheduled_date:
+                    habit.end_date = occurrence.scheduled_date - timedelta(days=1)
+                habit.save(update_fields=["recurrence_rule", "end_date", "updated_at"])
+                habit.occurrences.filter(
+                    scheduled_date__gte=occurrence.scheduled_date,
+                    is_deleted=False,
+                ).update(status="skipped", updated_at=timezone.now())
+                OccurrenceReminder.objects.filter(
+                    occurrence__habit=habit,
+                    occurrence__scheduled_date__gte=occurrence.scheduled_date,
+                    is_deleted=False,
+                ).update(is_deleted=True, updated_at=timezone.now())
+                transaction.on_commit(lambda: sync_recurring_parent_to_google_task.delay("habit", str(habit.id), str(habit.user.user_id), "primary"))
+            else:
+                mark_occurrence(habit, occurrence, "skipped", notes=request.data.get("notes"))
+                transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(habit.user.user_id), "primary"))
             if habit.milestone:
                 check_milestone_completion(habit.milestone)
             if habit.goal:
@@ -192,6 +212,7 @@ class HabitLogAPIView(HabitBaseAPIView):
         override_dependency = bool(request.data.get("override_dependency", False))
         override_reason = request.data.get("override_reason")
         mark_occurrence(habit, occurrence, status_value, notes=request.data.get("notes"), override_dependency=override_dependency, override_reason=override_reason)
+        transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(habit.user.user_id), "primary"))
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:

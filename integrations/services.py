@@ -7,7 +7,7 @@ import urllib.error
 import logging
 import time as pytime
 from datetime import datetime, timezone, timedelta, time
-
+from sadhak_base.notifications import send_notification
 from django.core.cache import cache
 from django.utils import timezone as dj_timezone
 from integrations.crypto import encrypt_token, decrypt_token
@@ -33,7 +33,11 @@ class GoogleTokenExpiredException(Exception):
 def build_google_oauth_url(mode: str, redirect_uri: str) -> tuple[str, str]:
     client_id = _env("GOOGLE_OAUTH_CLIENT_ID", "")
     state = secrets.token_urlsafe(32)
-    cache.set(f"google_oauth_state:{state}", mode, timeout=900)
+    cache.set(
+        f"google_oauth_state:{state}",
+        {"mode": mode, "redirect_uri": redirect_uri},
+        timeout=900,
+    )
 
     if mode == "calendar":
         scope = "openid email profile https://www.googleapis.com/auth/calendar"
@@ -58,10 +62,10 @@ def build_google_oauth_url(mode: str, redirect_uri: str) -> tuple[str, str]:
 
 
 def validate_state_and_get_mode(state: str) -> str | None:
-    mode = cache.get(f"google_oauth_state:{state}")
-    if mode:
+    state_data = cache.get(f"google_oauth_state:{state}")
+    if state_data:
         cache.delete(f"google_oauth_state:{state}")
-    return mode
+    return state_data
 
 
 def exchange_code_for_token(code: str, redirect_uri: str) -> dict:
@@ -589,10 +593,12 @@ def _delete_soft_deleted_parent_occurrences_from_google(user, parent, calendar_i
         return 0
 
     from tracker.models import TaskOccurrence
-
     occurrence_filters = {"task": parent} if getattr(parent, "is_habit", False) is False else {"habit": parent}
+    occurrences = TaskOccurrence.objects.filter(**occurrence_filters).order_by("scheduled_date", "scheduled_time", "created_at")
     deleted_count = 0
-    for occurrence in TaskOccurrence.objects.filter(**occurrence_filters, is_deleted=True).order_by("scheduled_date", "scheduled_time", "created_at"):
+    for occurrence in occurrences:
+        if occurrence.is_deleted is False:
+            continue
         mapping = EventSyncMap.objects.filter(
             user=user,
             calendar_id=calendar_id,
@@ -604,7 +610,6 @@ def _delete_soft_deleted_parent_occurrences_from_google(user, parent, calendar_i
             continue
         if mapping and mapping.is_deleted:
             continue
-
         result = delete_google_event_from_calendar(
             user,
             google_event_id,
@@ -638,7 +643,18 @@ def sync_parent_occurrences_to_google(user, parent, calendar_id: str = "primary"
         result = push_local_occurrence_change(user, occurrence, action="create", calendar_id=calendar_id)
         if result.get("pushed"):
             synced += 1
-    return {"synced": True,  "deleted_occurrences": deleted_count, "pushed_occurrences": synced}
+            if result.get("google_event_id") and result.get("action")!="delete":
+                occurrence.google_event_id = result["google_event_id"]
+                occurrence.save(update_fields=["google_event_id", "updated_at"])
+        if not result.get("pushed") and result.get("reason") in {"access_token_error", "not_connected"}:
+            return {
+                "synced": False,
+                "reason": result.get("reason"),
+                "deleted_occurrences": deleted_count,
+                "pushed_occurrences": synced,
+            }
+
+    return {"synced": True, "deleted_occurrences": deleted_count, "pushed_occurrences": synced}
 
 def sync_google_notifications_to_app(user, google_event: dict, parent=None, occurrence=None) -> dict:
     from tracker.models import TaskOccurrence
@@ -1499,12 +1515,6 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
     if error:
         return {"pushed": False, "reason": f"access_token_error: {error}"}
     title = (occurrence.task.title if occurrence.task_id else occurrence.habit.title) if (occurrence.task_id or occurrence.habit_id) else "Event"
-    # tz = "IST"
-    # date_str = occurrence.scheduled_date.isoformat()
-    # start_time = occurrence.scheduled_time.isoformat() if occurrence.scheduled_time else "00:00:00"
-    # end_time = occurrence.schedule_end_time.isoformat() if occurrence.schedule_end_time else start_time
-    # start_iso = f"{date_str}T{start_time}+00:00"
-    # end_iso = f"{date_str}T{end_time}+00:00"
     start_iso, tz = _google_date_time_payload(occurrence.scheduled_date, occurrence.scheduled_time)
     end_iso, _ = _google_date_time_payload(occurrence.scheduled_date, occurrence.schedule_end_time or occurrence.scheduled_time)
     
@@ -1557,6 +1567,7 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
         mapping.save(
             update_fields=[
                 "etag",
+                "google_etag",
                 "last_local_updated_at",
                 "last_google_updated_at",
                 "is_deleted",
