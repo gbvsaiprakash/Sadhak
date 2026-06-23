@@ -10,7 +10,7 @@ from tracker.services import check_goal_completion, check_milestone_completion, 
 from tracker.views.mixins import TrackerAPIViewMixin
 from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
 from integrations.services import _update_rrule_until_date
-from integrations.tasks import delete_parent_from_google_task, push_occurrence_to_google_task, sync_recurring_parent_to_google_task
+from integrations.tasks import delete_parent_from_google_task, sync_parent_action_to_google_task, sync_recurring_parent_to_google_task
 
 
 class TaskBaseAPIView(TrackerAPIViewMixin):
@@ -146,7 +146,16 @@ class TaskCompleteAPIView(TaskBaseAPIView):
             override_reason = request.data.get("override_reason")
             mark_occurrence(task, occurrence, "completed", notes=notes, override_dependency=override_dependency, override_reason=override_reason)
             sync_task_status_from_occurrences(task)
-            transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(task.user.user_id), "primary"))
+            transaction.on_commit(
+                lambda: sync_parent_action_to_google_task.delay(
+                    "task",
+                    str(task.id),
+                    str(task.user.user_id),
+                    "update",
+                    "primary",
+                    str(occurrence.id),
+                )
+            )
         else:
             task.status = "completed"
             task.save(update_fields=["status", "updated_at"])
@@ -163,11 +172,19 @@ class TaskSkipAPIView(TaskBaseAPIView):
         occurrence = TaskOccurrence.objects.filter(task=task, id=request.data.get("occurrence_id")).first()
         if occurrence is None:
             return self.finalize_error("TASK_NOT_FOUND", "Task occurrence was not found.")
-        if task.recurrence_rule and request.data.get("delete_all_future") is not None:
+        recurrence_rule = task.recurrence_rule or task.build_recurrence_rule()
+        if recurrence_rule and not task.recurrence_rule:
+            task.recurrence_rule = recurrence_rule
+            task._skip_google_calendar_sync = True
+            try:
+                task.save(update_fields=["recurrence_rule", "updated_at"])
+            finally:
+                task._skip_google_calendar_sync = False
+        if recurrence_rule and request.data.get("delete_all_future") is not None:
             delete_all_future = bool(request.data.get("delete_all_future"))
             if delete_all_future:
                 task.recurrence_rule = _update_rrule_until_date(
-                    task.recurrence_rule,
+                    recurrence_rule,
                     occurrence.scheduled_date - timedelta(days=1),
                 )
                 if task.end_date is None or task.end_date >= occurrence.scheduled_date:
@@ -185,7 +202,16 @@ class TaskSkipAPIView(TaskBaseAPIView):
                 transaction.on_commit(lambda: sync_recurring_parent_to_google_task.delay("task", str(task.id), str(task.user.user_id), "primary"))
             else:
                 mark_occurrence(task, occurrence, "skipped", notes=request.data.get("notes"))
-                transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(task.user.user_id), "primary"))
+                transaction.on_commit(
+                    lambda: sync_parent_action_to_google_task.delay(
+                        "task",
+                        str(task.id),
+                        str(task.user.user_id),
+                        "update",
+                        "primary",
+                        str(occurrence.id),
+                    )
+                )
             sync_task_status_from_occurrences(task)
             if task.milestone:
                 check_milestone_completion(task.milestone)
@@ -194,7 +220,16 @@ class TaskSkipAPIView(TaskBaseAPIView):
             return Response(self.detail_serializer_class(task, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
         mark_occurrence(task, occurrence, "skipped", notes=request.data.get("notes"))
         sync_task_status_from_occurrences(task)
-        transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(task.user.user_id), "primary"))
+        transaction.on_commit(
+            lambda: sync_parent_action_to_google_task.delay(
+                "task",
+                str(task.id),
+                str(task.user.user_id),
+                "update",
+                "primary",
+                str(occurrence.id),
+            )
+        )
         if task.milestone:
             check_milestone_completion(task.milestone)
         if task.goal:

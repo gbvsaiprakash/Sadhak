@@ -9,10 +9,11 @@ import time as pytime
 from datetime import datetime, timezone, timedelta, time
 from sadhak_base.notifications import send_notification
 from django.core.cache import cache
+from django.core import signing
 from django.utils import timezone as dj_timezone
 from integrations.crypto import encrypt_token, decrypt_token
 from integrations.models import GoogleCalendarConnection, GoogleCalendarMirrorEvent, GoogleCalendarWatch, EventSyncMap
-from integrations.rrule_handler import RRuleHandler
+from integrations.rrule_handler import RRuleHandler, build_recurrence_rule_for_entity
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,15 @@ class GoogleTokenExpiredException(Exception):
 
 def build_google_oauth_url(mode: str, redirect_uri: str) -> tuple[str, str]:
     client_id = _env("GOOGLE_OAUTH_CLIENT_ID", "")
-    state = secrets.token_urlsafe(32)
+    # state = secrets.token_urlsafe(32)
+    state = signing.dumps(
+        {
+            "mode": mode,
+            "redirect_uri": redirect_uri,
+            "nonce": secrets.token_urlsafe(16),
+        },
+        salt="google-oauth-state",
+    )
     cache.set(
         f"google_oauth_state:{state}",
         {"mode": mode, "redirect_uri": redirect_uri},
@@ -61,11 +70,27 @@ def build_google_oauth_url(mode: str, redirect_uri: str) -> tuple[str, str]:
     return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}", state
 
 
-def validate_state_and_get_mode(state: str) -> str | None:
+def validate_state_and_get_mode(state: str) -> dict | None:
     state_data = cache.get(f"google_oauth_state:{state}")
     if state_data:
         cache.delete(f"google_oauth_state:{state}")
-    return state_data
+        return state_data
+    
+    try:
+        payload = signing.loads(state, salt="google-oauth-state", max_age=900)
+    except signing.BadSignature:
+        return None
+    except signing.SignatureExpired:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    mode = payload.get("mode")
+    redirect_uri = payload.get("redirect_uri")
+    if not mode or not redirect_uri:
+        return None
+    return {"mode": mode, "redirect_uri": redirect_uri}
 
 
 def exchange_code_for_token(code: str, redirect_uri: str) -> dict:
@@ -529,6 +554,24 @@ def delete_google_event_from_calendar(user, google_event_id: str, calendar_id: s
     return {"deleted": True, "google_event_id": google_event_id}
 
 
+def delete_google_events_from_calendar(user, google_event_ids: list[str], calendar_id: str = "primary") -> dict:
+    deleted_count = 0
+    failed_google_event_ids: list[str] = []
+    for google_event_id in google_event_ids:
+        if not google_event_id:
+            continue
+        result = delete_google_event_from_calendar(user, google_event_id, calendar_id=calendar_id)
+        if result.get("deleted"):
+            deleted_count += 1
+        else:
+            failed_google_event_ids.append(google_event_id)
+    return {
+        "deleted": True,
+        "deleted_count": deleted_count,
+        "failed_google_event_ids": failed_google_event_ids,
+    }
+
+
 def delete_parent_from_google(user, parent, calendar_id: str = "primary") -> dict:
     """
     Remove a task/habit from Google Calendar when the parent is deleted in-app.
@@ -621,7 +664,12 @@ def _delete_soft_deleted_parent_occurrences_from_google(user, parent, calendar_i
 
     return deleted_count
 
-def sync_parent_occurrences_to_google(user, parent, calendar_id: str = "primary") -> dict:
+def sync_parent_occurrences_to_google(
+    user,
+    parent,
+    calendar_id: str = "primary",
+    stale_google_event_ids: list[str] | None = None,
+) -> dict:
     """
     Push one-off app-generated occurrences to Google after they are generated.
     Recurring parents are skipped because their Google root event is the source
@@ -629,10 +677,18 @@ def sync_parent_occurrences_to_google(user, parent, calendar_id: str = "primary"
     """
     if not parent:
         return {"synced": False, "reason": "missing_parent"}
-    if getattr(parent, "recurrence_rule", None):
-        return {"synced": False, "reason": "recurring_parent"}
+    deleted_stale = 0
+    if stale_google_event_ids:
+        deleted_stale = delete_google_events_from_calendar(
+            user,
+            stale_google_event_ids,
+            calendar_id=calendar_id,
+        ).get("deleted_count", 0)
+    recurrence_rule = _ensure_parent_recurrence_rule(parent)
+    if recurrence_rule:
+        return {"synced": False, "reason": "recurring_parent", "deleted_stale_occurrences": deleted_stale}
     if getattr(parent, "external_google_id", False) or getattr(parent, "synced_from_google", False):
-        return {"synced": False, "reason": "google_source_of_truth"}
+        return {"synced": False, "reason": "google_source_of_truth", "deleted_stale_occurrences": deleted_stale}
 
     from tracker.models import TaskOccurrence
 
@@ -650,11 +706,44 @@ def sync_parent_occurrences_to_google(user, parent, calendar_id: str = "primary"
             return {
                 "synced": False,
                 "reason": result.get("reason"),
+                "deleted_stale_occurrences": deleted_stale,
                 "deleted_occurrences": deleted_count,
                 "pushed_occurrences": synced,
             }
 
-    return {"synced": True, "deleted_occurrences": deleted_count, "pushed_occurrences": synced}
+    return {
+        "synced": True,
+        "deleted_stale_occurrences": deleted_stale,
+        "deleted_occurrences": deleted_count,
+        "pushed_occurrences": synced,
+    }
+
+
+def sync_parent_action_to_google(
+    user,
+    parent,
+    action: str,
+    occurrence=None,
+    calendar_id: str = "primary",
+    stale_google_event_ids: list[str] | None = None,
+) -> dict:
+    if not parent:
+        return {"synced": False, "reason": "missing_parent"}
+    if action == "delete" or getattr(parent, "is_deleted", False):
+        return delete_parent_from_google(user, parent, calendar_id=calendar_id)
+    recurrence_rule = _ensure_parent_recurrence_rule(parent)
+    if recurrence_rule:
+        if occurrence is not None:
+            return handle_recurring_occurrence_change(user, occurrence, action=action, calendar_id=calendar_id)
+        return create_recurring_google_event(user, parent, calendar_id=calendar_id)
+    if action in {"create", "update"}:
+        return sync_parent_occurrences_to_google(
+            user,
+            parent,
+            calendar_id=calendar_id,
+            stale_google_event_ids=stale_google_event_ids,
+        )
+    return {"synced": False, "reason": f"unsupported_action:{action}"}
 
 def sync_google_notifications_to_app(user, google_event: dict, parent=None, occurrence=None) -> dict:
     from tracker.models import TaskOccurrence
@@ -883,6 +972,22 @@ def _update_rrule_until_date(rrule_str: str, until_date) -> str:
     parts = [part for part in (rrule_str or "").split(";") if part and not part.startswith("UNTIL=")]
     parts.append(f"UNTIL={until_date.strftime('%Y%m%d')}")
     return ";".join(parts)
+
+
+def _ensure_parent_recurrence_rule(parent):
+    recurrence_rule = getattr(parent, "recurrence_rule", None)
+    if recurrence_rule:
+        return recurrence_rule
+
+    recurrence_rule = build_recurrence_rule_for_entity(parent)
+    if recurrence_rule:
+        parent.recurrence_rule = recurrence_rule
+        parent._skip_google_calendar_sync = True
+        try:
+            parent.save(update_fields=["recurrence_rule", "updated_at"])
+        finally:
+            parent._skip_google_calendar_sync = False
+    return recurrence_rule
 
 
 def _find_google_recurring_instance(access_token: str, calendar_id: str, task, occurrence):
@@ -1251,7 +1356,8 @@ def sync_external_google_event_to_app(user, google_event: dict, calendar_id: str
 def handle_recurring_occurrence_change(user, occurrence, action: str, calendar_id: str = "primary") -> dict:
     parent = occurrence.task or occurrence.habit
     parent_type = "task" if occurrence.task_id else "habit"
-    if not parent or not getattr(parent, "recurrence_rule", None) or not getattr(parent, "google_event_id", None):
+    recurrence_rule = _ensure_parent_recurrence_rule(parent) if parent else None
+    if not parent or not recurrence_rule or not getattr(parent, "google_event_id", None):
         return {"pushed": False, "reason": "not_recurring"}
 
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
@@ -1336,14 +1442,15 @@ def _delete_recurring_parent_occurrence_in_app(occurrence, delete_all_future: bo
     if not parent:
         return {"deleted": False, "reason": "no_parent"}
 
-    if not parent.recurrence_rule:
+    recurrence_rule = _ensure_parent_recurrence_rule(parent)
+    if not recurrence_rule:
         occurrence.is_deleted = True
         occurrence.save(update_fields=["is_deleted", "updated_at"])
         return push_local_occurrence_change(parent.user, occurrence, action="delete", calendar_id=calendar_id)
 
     if delete_all_future:
         parent.recurrence_rule = _update_rrule_until_date(
-            parent.recurrence_rule,
+            recurrence_rule,
             occurrence.scheduled_date - timedelta(days=1),
         )
         if parent.end_date is None or parent.end_date >= occurrence.scheduled_date:
@@ -1382,7 +1489,8 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
     Returns:
         dict with keys: created, google_event_id, error (if any)
     """
-    if not task.recurrence_rule:
+    recurrence_rule = _ensure_parent_recurrence_rule(task)
+    if not recurrence_rule:
         return {"created": False, "error": "Task has no recurrence_rule"}
     
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
@@ -1400,7 +1508,7 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
         end_iso, _ = _google_date_time_payload(task.start_date, task.end_time or task.start_time)
         
         # Convert RRULE to Google's recurrence format (list with "RRULE:" prefix)
-        google_recurrence = RRuleHandler.rrule_to_google_event_recurrence(task.recurrence_rule)
+        google_recurrence = RRuleHandler.rrule_to_google_event_recurrence(recurrence_rule)
         
         # Map task status (use pending for new task)
         google_status, extended_props = _map_app_status_to_google("pending")
@@ -1463,7 +1571,7 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
                 "calendar_id": calendar_id,
                 "etag": res.get("etag"),
                 "is_recurring": True,
-                "recurrence_rule": task.recurrence_rule,
+                "recurrence_rule": recurrence_rule,
                 "google_etag": res.get("etag"),
                 "last_local_updated_at": dj_timezone.now(),
                 "last_google_updated_at": dj_timezone.now(),
@@ -1478,7 +1586,7 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
         
         logger.info(
             f"Created recurring Google Calendar event {google_event_id} for task {task.id} "
-            f"(user {user.username}) with RRULE: {task.recurrence_rule}"
+            f"(user {user.username}) with RRULE: {recurrence_rule}"
         )
         
         return {"created": True, "google_event_id": google_event_id, "action": "update" if was_existing_event else "create", "parent_type": parent_type}
@@ -1501,11 +1609,11 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
     # Check if this occurrence is part of a recurring task
     if occurrence.task_id:
         task = occurrence.task
-        if task and task.recurrence_rule:
+        if task and _ensure_parent_recurrence_rule(task):
             return handle_recurring_occurrence_change(user, occurrence, action=action, calendar_id=calendar_id)
     if occurrence.habit_id:
         habit = occurrence.habit
-        if habit and getattr(habit, "recurrence_rule", None):
+        if habit and _ensure_parent_recurrence_rule(habit):
             return handle_recurring_occurrence_change(user, occurrence, action=action, calendar_id=calendar_id)
     
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()

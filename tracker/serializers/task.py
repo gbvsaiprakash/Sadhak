@@ -6,6 +6,7 @@ from rest_framework import serializers
 from tracker.constants import REMINDER_MODE_SET
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Task, TaskOccurrence
+from integrations.models import EventSyncMap
 from tracker.serializers.common import TrackerValidationMixin, is_overdue, occurrence_stats, DependencyItemSerializer
 from tracker.services import (
     check_entity_schedule_conflicts,
@@ -73,6 +74,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
     completed_occurrences = serializers.SerializerMethodField()
     missed_occurrences = serializers.SerializerMethodField()
     skipped_occurrences = serializers.SerializerMethodField()
+    recurrence_rule = serializers.CharField(read_only=True, allow_null=True)
     dependencies = DependencyItemSerializer(many=True, write_only=True, required=False)
     dependency_items = serializers.SerializerMethodField(read_only=True)
 
@@ -118,6 +120,7 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             "day_of_week",
             "day_of_month",
             "interval_hours",
+            "recurrence_rule",
             "is_habit",
             "is_overdue",
             "next_occurrence",
@@ -522,6 +525,16 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             set_dependencies(task, deps, self.context["request"].user)
 
         if schedule_changed:
+            existing_occurrence_ids = list(task.occurrences.values_list("id", flat=True))
+            stale_google_event_ids = list(
+                EventSyncMap.objects.filter(
+                    user=task.user,
+                    calendar_id="primary",
+                    local_parent_type="task",
+                    local_occurrence_id__in=existing_occurrence_ids,
+                    is_deleted=False,
+                ).values_list("google_event_id", flat=True).distinct()
+            )
             from_date, to_date = self._get_schedule_window(old_instance, task, validated_data)
             today = timezone.localdate()
             effective_from = max(today, from_date)
@@ -537,7 +550,15 @@ class TaskDetailSerializer(TaskListSerializer, TrackerValidationMixin):
             except TypeError:
                 # fallback for any unforeseen issues in reconciliation logic
                 generate_occurrences(task, from_date=effective_from, to_date=to_date)
-            transaction.on_commit(lambda: sync_parent_occurrences_to_google_task.delay("task", str(task.id), str(task.user.user_id), "primary"))
+            transaction.on_commit(
+                lambda: sync_parent_occurrences_to_google_task.delay(
+                    "task",
+                    str(task.id),
+                    str(task.user.user_id),
+                    "primary",
+                    stale_google_event_ids,
+                )
+            )
         elif reminder_changed:
             sync_occurrence_reminders_for_parent(task)
             transaction.on_commit(lambda: sync_parent_reminders_to_google_task.delay("task", str(task.id), str(task.user.user_id), "primary"))

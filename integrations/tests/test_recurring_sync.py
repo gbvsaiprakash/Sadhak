@@ -257,6 +257,40 @@ class RecurringTaskSyncTests(TestCase):
         self.assertEqual(task.duration_config, {"value": 45, "unit": "minutes"})
         self.assertEqual(habit.duration_config, {"value": 20, "unit": "minutes"})
 
+    def test_recurrence_rule_is_auto_derived_on_save_for_task_and_habit(self):
+        task = Task.objects.create(
+            user=self.user,
+            title="Recurring Task",
+            section="personal",
+            status="pending",
+            frequency_type="daily",
+            frequency_interval=1,
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 12),
+            start_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+        )
+        habit = Habit.objects.create(
+            user=self.user,
+            title="Recurring Habit",
+            section="personal",
+            status="active",
+            frequency_type="weekly",
+            frequency_interval=1,
+            frequency_days=[1, 3, 5],
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 30),
+            start_time=datetime.strptime("07:00:00", "%H:%M:%S").time(),
+        )
+
+        task.refresh_from_db()
+        habit.refresh_from_db()
+
+        self.assertIsNotNone(task.recurrence_rule)
+        self.assertIn("FREQ=DAILY", task.recurrence_rule)
+        self.assertIsNotNone(habit.recurrence_rule)
+        self.assertIn("FREQ=WEEKLY", habit.recurrence_rule)
+        self.assertIn("BYDAY=", habit.recurrence_rule)
+
     def test_ensure_future_occurrences_skips_google_imported_habits(self):
         habit = Habit.objects.create(
             user=self.user,
@@ -454,6 +488,40 @@ class RecurringTaskSyncTests(TestCase):
         self.assertEqual(mock_delete.call_count, 1)
         self.assertEqual(mock_push.call_count, 1)
 
+    @patch('integrations.services.delete_google_events_from_calendar')
+    @patch('integrations.services.push_local_occurrence_change')
+    def test_sync_parent_occurrences_to_google_deletes_stale_google_events_before_push(self, mock_push, mock_delete):
+        task = Task.objects.create(
+            user=self.user,
+            title="Schedule Refresh",
+            section="personal",
+            status="pending",
+            frequency_type="once",
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 8),
+            start_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+        )
+        TaskOccurrence.objects.create(
+            task=task,
+            scheduled_date=date(2026, 6, 8),
+            scheduled_time=datetime.strptime("10:00:00", "%H:%M:%S").time(),
+            status="pending",
+        )
+        mock_delete.return_value = {"deleted": True, "deleted_count": 1, "failed_google_event_ids": []}
+        mock_push.return_value = {"pushed": True}
+
+        result = sync_parent_occurrences_to_google(
+            self.user,
+            task,
+            stale_google_event_ids=["google_old_duration"],
+        )
+
+        self.assertTrue(result["synced"])
+        self.assertEqual(result["deleted_stale_occurrences"], 1)
+        self.assertEqual(mock_delete.call_count, 1)
+        self.assertEqual(mock_delete.call_args.args[1], ["google_old_duration"])
+        self.assertEqual(mock_push.call_count, 1)
+
     @patch('integrations.services.push_local_occurrence_change')
     def test_sync_parent_occurrences_to_google_returns_failed_status_on_access_token_issue(self, mock_push):
         task = Task.objects.create(
@@ -588,7 +656,37 @@ class RecurringTaskSyncTests(TestCase):
         
         self.assertFalse(result["created"])
         self.assertIn("no recurrence_rule", result["error"])
-    
+
+    @patch('integrations.services._google_request_json_with_retry')
+    @patch('integrations.services._google_request_json')
+    @patch('integrations.services.ensure_valid_access_token')
+    def test_create_recurring_google_event_rebuilds_missing_recurrence_rule(self, mock_token, mock_request, mock_retry_request):
+        mock_token.return_value = "access_token"
+        mock_request.return_value = {"id": "google_event_rebuilt", "etag": "etag_rebuilt"}
+        mock_retry_request.return_value = {"id": "google_event_rebuilt", "etag": "etag_rebuilt"}
+
+        task = Task.objects.create(
+            user=self.user,
+            title="Auto RRULE",
+            section="personal",
+            status="pending",
+            frequency_type="daily",
+            frequency_interval=1,
+            start_date=date(2026, 6, 8),
+            end_date=date(2026, 6, 12),
+            start_time=datetime.strptime("09:00:00", "%H:%M:%S").time(),
+        )
+        Task.objects.filter(pk=task.pk).update(recurrence_rule=None)
+        task.refresh_from_db()
+        self.assertIsNone(task.recurrence_rule)
+
+        result = create_recurring_google_event(self.user, task)
+
+        self.assertTrue(result["created"])
+        task.refresh_from_db()
+        self.assertIsNotNone(task.recurrence_rule)
+        self.assertIn("FREQ=DAILY", task.recurrence_rule)
+
     def test_create_recurring_event_no_google_connection(self):
         """Test that sync fails gracefully without Google Calendar connection."""
         # Create user without Google Calendar connection

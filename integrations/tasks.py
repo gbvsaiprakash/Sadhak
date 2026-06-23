@@ -12,6 +12,7 @@ from integrations.services import (
     sync_external_google_event_to_app,
     sync_google_status_to_app_occurrences,
     upsert_mirror_events,
+    sync_parent_action_to_google,
     sync_parent_occurrences_to_google,
     sync_parent_reminders_to_google,
     _coerce_access_token_result,
@@ -64,7 +65,13 @@ def sync_recurring_parent_to_google_task(parent_type: str, parent_id: str, user_
 
 
 @shared_task
-def sync_parent_occurrences_to_google_task(parent_type: str, parent_id: str, user_id: str, calendar_id: str = "primary"):
+def sync_parent_occurrences_to_google_task(
+    parent_type: str,
+    parent_id: str,
+    user_id: str,
+    calendar_id: str = "primary",
+    stale_google_event_ids: list[str] | None = None,
+):
     parent_model = Task if parent_type == "task" else Habit
     user = User.objects.filter(pk=user_id).first()
     parent = parent_model.objects.filter(id=parent_id).first()
@@ -72,9 +79,38 @@ def sync_parent_occurrences_to_google_task(parent_type: str, parent_id: str, use
         return {"synced": False, "reason": "missing_parent_or_user"}
 
     result = sync_parent_occurrences_to_google(user, parent, calendar_id=calendar_id)
-    print(f"Sync parent occurrences result: {result}")
     if not result.get("synced") and result.get("reason") in {"access_token_error", "not_connected"}:
         _notify_google_sync_issue(user, result.get("reason", "unknown"), parent=parent, calendar_id=calendar_id)
+    return result
+
+
+@shared_task
+def sync_parent_action_to_google_task(
+    parent_type: str,
+    parent_id: str,
+    user_id: str,
+    action: str,
+    calendar_id: str = "primary",
+    occurrence_id: str | None = None,
+    stale_google_event_ids: list[str] | None = None,
+):
+    parent_model = Task if parent_type == "task" else Habit
+    user = User.objects.filter(pk=user_id).first()
+    parent = parent_model.objects.filter(id=parent_id).first()
+    if not user or not parent:
+        return {"synced": False, "reason": "missing_parent_or_user"}
+
+    occurrence = TaskOccurrence.objects.filter(id=occurrence_id).first() if occurrence_id else None
+    result = sync_parent_action_to_google(
+        user,
+        parent,
+        action=action,
+        occurrence=occurrence,
+        calendar_id=calendar_id,
+        stale_google_event_ids=stale_google_event_ids,
+    )
+    if not result.get("synced") and result.get("reason") in {"access_token_error", "not_connected"}:
+        _notify_google_sync_issue(user, result.get("reason", "unknown"), parent=parent, occurrence=occurrence, calendar_id=calendar_id)
     return result
 
 

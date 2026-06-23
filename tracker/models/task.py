@@ -65,6 +65,11 @@ class Task(UUIDTimeStampedModel):
 
     def __str__(self):
         return self.title
+
+    def build_recurrence_rule(self):
+        from integrations.rrule_handler import build_recurrence_rule_for_entity
+
+        return build_recurrence_rule_for_entity(self)
     
     def get_normalized_reminders(self):
         """
@@ -174,5 +179,15 @@ class Task(UUIDTimeStampedModel):
         elif not self.reminder_enabled:
             self.reminder_offset = []
         self.full_clean()
+        recurrence_rule = self.build_recurrence_rule()
+        if recurrence_rule is None and self.recurrence_rule:
+            recurrence_rule = self.recurrence_rule
+        if self.recurrence_rule != recurrence_rule:
+            self.recurrence_rule = recurrence_rule
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                update_fields = set(update_fields)
+                update_fields.add("recurrence_rule")
+                kwargs["update_fields"] = list(update_fields)
         super().save(*args, **kwargs)
         

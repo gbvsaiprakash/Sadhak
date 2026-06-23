@@ -1,5 +1,5 @@
 from django.core.management.base import BaseCommand
-from integrations.services import push_local_occurrence_change
+from integrations.services import sync_parent_action_to_google
 from tracker.models import TaskOccurrence
 from user_management.models import User
 
@@ -52,7 +52,7 @@ class Command(BaseCommand):
         self.stdout.write(f'Parent: {parent.title}\n')
 
         try:
-            result = push_local_occurrence_change(user, occurrence, action=action)
+            result = sync_parent_action_to_google(user, parent, action=action, occurrence=occurrence)
             self.stdout.write(self.style.SUCCESS(f'Sync Result:'))
             for key, value in result.items():
                 self.stdout.write(f'  {key}: {value}')

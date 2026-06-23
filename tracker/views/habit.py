@@ -9,7 +9,7 @@ from tracker.services import check_goal_completion, check_milestone_completion, 
 from tracker.views.mixins import TrackerAPIViewMixin
 from tracker.services.dependency import ensure_not_depended_on, list_dependency_candidates, list_dependency_candidates_for_create, soft_delete_owned_dependencies
 from integrations.services import _update_rrule_until_date
-from integrations.tasks import delete_parent_from_google_task, push_occurrence_to_google_task, sync_recurring_parent_to_google_task
+from integrations.tasks import delete_parent_from_google_task, sync_parent_action_to_google_task, sync_recurring_parent_to_google_task
 
 
 class HabitBaseAPIView(TrackerAPIViewMixin):
@@ -180,11 +180,19 @@ class HabitLogAPIView(HabitBaseAPIView):
         occurrence = TaskOccurrence.objects.filter(habit=habit, id=request.data.get("occurrence_id")).first()
         if occurrence is None:
             return self.finalize_error("HABIT_NOT_FOUND", "Habit occurrence was not found.")
-        if habit.recurrence_rule and request.data.get("delete_all_future") is not None:
+        recurrence_rule = habit.recurrence_rule or habit.build_recurrence_rule()
+        if recurrence_rule and not habit.recurrence_rule:
+            habit.recurrence_rule = recurrence_rule
+            habit._skip_google_calendar_sync = True
+            try:
+                habit.save(update_fields=["recurrence_rule", "updated_at"])
+            finally:
+                habit._skip_google_calendar_sync = False
+        if recurrence_rule and request.data.get("delete_all_future") is not None:
             delete_all_future = bool(request.data.get("delete_all_future"))
             if delete_all_future:
                 habit.recurrence_rule = _update_rrule_until_date(
-                    habit.recurrence_rule,
+                    recurrence_rule,
                     occurrence.scheduled_date - timedelta(days=1),
                 )
                 if habit.end_date is None or habit.end_date >= occurrence.scheduled_date:
@@ -202,7 +210,16 @@ class HabitLogAPIView(HabitBaseAPIView):
                 transaction.on_commit(lambda: sync_recurring_parent_to_google_task.delay("habit", str(habit.id), str(habit.user.user_id), "primary"))
             else:
                 mark_occurrence(habit, occurrence, "skipped", notes=request.data.get("notes"))
-                transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(habit.user.user_id), "primary"))
+                transaction.on_commit(
+                    lambda: sync_parent_action_to_google_task.delay(
+                        "habit",
+                        str(habit.id),
+                        str(habit.user.user_id),
+                        "update",
+                        "primary",
+                        str(occurrence.id),
+                    )
+                )
             if habit.milestone:
                 check_milestone_completion(habit.milestone)
             if habit.goal:
@@ -212,7 +229,16 @@ class HabitLogAPIView(HabitBaseAPIView):
         override_dependency = bool(request.data.get("override_dependency", False))
         override_reason = request.data.get("override_reason")
         mark_occurrence(habit, occurrence, status_value, notes=request.data.get("notes"), override_dependency=override_dependency, override_reason=override_reason)
-        transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(occurrence.id), "update", str(habit.user.user_id), "primary"))
+        transaction.on_commit(
+            lambda: sync_parent_action_to_google_task.delay(
+                "habit",
+                str(habit.id),
+                str(habit.user.user_id),
+                "update",
+                "primary",
+                str(occurrence.id),
+            )
+        )
         if habit.milestone:
             check_milestone_completion(habit.milestone)
         if habit.goal:

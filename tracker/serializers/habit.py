@@ -6,6 +6,7 @@ from rest_framework import serializers
 from tracker.constants import REMINDER_MODE_SET
 from tracker.exceptions import raise_tracker_error
 from tracker.models import Habit, TaskOccurrence
+from integrations.models import EventSyncMap
 from tracker.serializers.common import TrackerValidationMixin, occurrence_stats, DependencyItemSerializer
 from tracker.services import (
     check_entity_schedule_conflicts,
@@ -67,6 +68,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
     total_occurrences = serializers.SerializerMethodField()
     completed_occurrences = serializers.SerializerMethodField()
     missed_occurrences = serializers.SerializerMethodField()
+    recurrence_rule = serializers.CharField(read_only=True, allow_null=True)
     conflict_override = serializers.BooleanField(write_only=True, required=False, default=False)
     conflict_override_reason = serializers.CharField(write_only=True, required=False, allow_blank=False)
     dependencies = DependencyItemSerializer(many=True, write_only=True, required=False)
@@ -112,6 +114,7 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             "day_of_week",
             "day_of_month",
             "interval_hours",
+            "recurrence_rule",
             "start_date",
             "end_date",
             "is_habit",
@@ -535,6 +538,16 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             set_dependencies(habit, deps, self.context["request"].user)
 
         if schedule_changed:
+            existing_occurrence_ids = list(habit.occurrences.values_list("id", flat=True))
+            stale_google_event_ids = list(
+                EventSyncMap.objects.filter(
+                    user=habit.user,
+                    calendar_id="primary",
+                    local_parent_type="habit",
+                    local_occurrence_id__in=existing_occurrence_ids,
+                    is_deleted=False,
+                ).values_list("google_event_id", flat=True).distinct()
+            )
             from_date, to_date = self._get_schedule_window(old_instance, habit, validated_data)
             effective_from = max(timezone.localdate(), from_date)
             if habit.end_date is None and habit.status == "active" and not habit.is_deleted:
@@ -575,7 +588,15 @@ class HabitDetailSerializer(HabitListSerializer, TrackerValidationMixin):
             except TypeError:
                 # regenerate_future_occurrences(habit)
                 generate_occurrences(habit, from_date=effective_from, to_date=to_date)
-            transaction.on_commit(lambda: sync_parent_occurrences_to_google_task.delay("habit", str(habit.id), str(habit.user.user_id), "primary"))
+            transaction.on_commit(
+                lambda: sync_parent_occurrences_to_google_task.delay(
+                    "habit",
+                    str(habit.id),
+                    str(habit.user.user_id),
+                    "primary",
+                    stale_google_event_ids,
+                )
+            )
         elif reminder_changed:
             sync_occurrence_reminders_for_parent(habit)
             transaction.on_commit(lambda: sync_parent_reminders_to_google_task.delay("habit", str(habit.id), str(habit.user.user_id), "primary"))

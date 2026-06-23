@@ -6,7 +6,7 @@ from django.db import transaction
 from tracker.models import TaskOccurrence, Task, Habit
 from integrations.tasks import (
     delete_parent_from_google_task,
-    push_occurrence_to_google_task,
+    sync_parent_action_to_google_task,
     sync_recurring_parent_to_google_task,
 )
 
@@ -92,18 +92,46 @@ def sync_occurrence_to_google(sender, instance: TaskOccurrence, created: bool, *
     try:
         logger.info(f"Syncing occurrence {instance.id} for user {user.username} (action: {'delete' if instance.is_deleted else 'create' if created else 'update'})")
         
+        parent_type = "task" if instance.task_id else "habit"
         if instance.is_deleted:
-            transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(instance.id), "delete", str(user.user_id), "primary"))
+            transaction.on_commit(
+                lambda: sync_parent_action_to_google_task.delay(
+                    parent_type,
+                    str(parent.id),
+                    str(user.user_id),
+                    "delete",
+                    "primary",
+                    str(instance.id),
+                )
+            )
             logger.info(f"Queued delete sync for occurrence {instance.id}")
             return
 
         if created:
-            transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(instance.id), "create", str(user.user_id), "primary"))
+            transaction.on_commit(
+                lambda: sync_parent_action_to_google_task.delay(
+                    parent_type,
+                    str(parent.id),
+                    str(user.user_id),
+                    "create",
+                    "primary",
+                    str(instance.id),
+                )
+            )
             logger.info(f"Queued create sync for occurrence {instance.id}")
             return
 
         # Update on any change including status changes
-        transaction.on_commit(lambda: push_occurrence_to_google_task.delay(str(instance.id), "update", str(user.user_id), "primary"))
+        transaction.on_commit(
+            lambda: sync_parent_action_to_google_task.delay(
+                parent_type,
+                str(parent.id),
+                str(user.user_id),
+                "update",
+                "primary",
+                str(instance.id),
+            )
+        )
         logger.info(f"Queued update sync for occurrence {instance.id}")
     except Exception as e:
         logger.error(f"Calendar sync error for occurrence {instance.id}: {str(e)}", exc_info=True)
