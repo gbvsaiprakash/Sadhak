@@ -7,7 +7,7 @@ Supports bidirectional conversion:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Optional, Dict, List, Any, Tuple
 from dateutil.rrule import rrule, DAILY, WEEKLY, MONTHLY, YEARLY, HOURLY, MO, TU, WE, TH, FR, SA, SU
 from dateutil.rrule import rrulestr
@@ -104,7 +104,8 @@ class RRuleHandler:
         
         # Add UNTIL date (end_date)
         if end_date:
-            until_str = end_date.strftime("%Y%m%d")
+            end_date = end_date - timedelta(hours=5, minutes=30)
+            until_str = end_date.strftime("%Y%m%dT%H%M%SZ")
             rrule_parts.append(f"UNTIL={until_str}")
         
         # Add BYDAY for weekly or specific weekdays
@@ -146,6 +147,7 @@ class RRuleHandler:
         
         rrule_str = ";".join(rrule_parts)
         logger.info(f"Built RRULE: {rrule_str}")
+        print(f"Built RRULE: {rrule_str}")
         return rrule_str
 
 
@@ -161,7 +163,14 @@ def build_recurrence_rule_for_entity(entity) -> Optional[str]:
 
     start_dt = datetime.combine(start_date, start_time)
     end_date = getattr(entity, "end_date", None)
-    end_dt = datetime.combine(end_date, start_time) if end_date else None
+    end_time = getattr(entity, "end_time", None) or time(23, 59, 59)  # Default to end of day if not specified
+    if end_date:
+        # Check if the cutoff time is earlier than the event start time on that day
+        if datetime.combine(end_date, end_time) < datetime.combine(end_date, start_time):
+            end_date = end_date - timedelta(days=1)
+        end_dt = datetime.combine(end_date, time(23, 59, 59))  # Use end of day for UNTIL
+    else:
+        end_dt = None
 
     try:
         interval = max(int(getattr(entity, "frequency_interval", 1) or 1), 1)
@@ -182,7 +191,7 @@ def build_recurrence_rule_for_entity(entity) -> Optional[str]:
                 monthdays.append(value)
         if monthdays:
             day_of_month = monthdays[0] if len(monthdays) == 1 else monthdays
-
+    print(f"Building RRULE for entity {entity}: frequency_type={frequency_type}, start_dt={start_dt}, end_dt={end_dt}, interval={interval}, frequency_days={frequency_days}, day_of_week={day_of_week}, day_of_month={day_of_month}")
     if frequency_type == "daily":
         return RRuleHandler.build_rrule(
             frequency_type="daily",

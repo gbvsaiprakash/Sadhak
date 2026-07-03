@@ -200,12 +200,14 @@ def _google_request_json_with_retry(
     transient_statuses = {429, 500, 502, 503, 504}
     last_error = None
     for attempt in range(retries):
+        print(url)
         req = urllib.request.Request(
             url,
             data=body,
             method=method,
             headers=headers,
         )
+        print(req.get_full_url)
         try:
             with urllib.request.urlopen(req, timeout=25) as r:
                 raw = r.read().decode() or "{}"
@@ -484,6 +486,12 @@ def _google_date_time_payload(date_value, time_value) -> tuple[str, str]:
     )
     return aware_dt.isoformat(), _google_time_zone_name()
 
+def _get_task_duration_config(task):
+    duration_config = getattr(task, "duration_config", None) or {"value": 30, "unit": "minutes"}
+    dummy_date = datetime.combine(task.start_date, task.start_time)
+    if duration_config["unit"] == "minutes":
+        return (dummy_date + timedelta(minutes=duration_config["value"])).time()
+    return (dummy_date + timedelta(hours=duration_config["value"])).time()
 
 def _occurrence_due_dt(occurrence):
     from datetime import datetime, time as dt_time
@@ -686,6 +694,7 @@ def sync_parent_occurrences_to_google(
         ).get("deleted_count", 0)
     recurrence_rule = _ensure_parent_recurrence_rule(parent)
     if recurrence_rule:
+        print(f"Recurring parent detected for sync_parent_occurrences_to_google: {parent} with recurrence_rule: {recurrence_rule}")
         return {"synced": False, "reason": "recurring_parent", "deleted_stale_occurrences": deleted_stale}
     if getattr(parent, "external_google_id", False) or getattr(parent, "synced_from_google", False):
         return {"synced": False, "reason": "google_source_of_truth", "deleted_stale_occurrences": deleted_stale}
@@ -733,7 +742,9 @@ def sync_parent_action_to_google(
         return delete_parent_from_google(user, parent, calendar_id=calendar_id)
     recurrence_rule = _ensure_parent_recurrence_rule(parent)
     if recurrence_rule:
+        print(f"Recurring parent detected for sync_parent_action_to_google: {parent} with recurrence_rule: {recurrence_rule}")
         if occurrence is not None:
+            print(f"Syncing recurring occurrence change for occurrence: {occurrence} with action: {action}")
             return handle_recurring_occurrence_change(user, occurrence, action=action, calendar_id=calendar_id)
         return create_recurring_google_event(user, parent, calendar_id=calendar_id)
     if action in {"create", "update"}:
@@ -1504,8 +1515,9 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
         was_existing_event = bool(task.google_event_id)
         
         # Prepare event payload with recurrence
+        get_duration_end_time_calculated = _get_task_duration_config(task)
         start_iso, tz = _google_date_time_payload(task.start_date, task.start_time)
-        end_iso, _ = _google_date_time_payload(task.start_date, task.end_time or task.start_time)
+        end_iso, _ = _google_date_time_payload(task.start_date, task.end_time or get_duration_end_time_calculated)
         
         # Convert RRULE to Google's recurrence format (list with "RRULE:" prefix)
         google_recurrence = RRuleHandler.rrule_to_google_event_recurrence(recurrence_rule)
