@@ -186,7 +186,7 @@ def sync_google_full_calendar_task(user_id: str, calendar_id: str = "primary"):
             external_synced += 1
     status_synced = sync_google_status_to_app_occurrences(user, calendar_id, items)
     next_sync_token = data.get("nextSyncToken")
-    watch_obj = GoogleCalendarWatch.objects.filter(id=watch.id).first()
+    watch_obj = GoogleCalendarWatch.objects.filter(user=user, calendar_id=calendar_id, is_active=True).first()
     if next_sync_token and watch_obj:
         watch_obj.sync_token = next_sync_token
         watch_obj.save(update_fields=["sync_token", "updated_at"])

@@ -104,9 +104,11 @@ class RRuleHandler:
         
         # Add UNTIL date (end_date)
         if end_date:
-            end_date = end_date - timedelta(hours=5, minutes=30)
-            until_str = end_date.strftime("%Y%m%dT%H%M%SZ")
-            rrule_parts.append(f"UNTIL={until_str}")
+            if isinstance(end_date, datetime):
+                until_value = end_date.date().strftime("%Y%m%d")
+            else:
+                until_value = end_date.strftime("%Y%m%d")
+            rrule_parts.append(f"UNTIL={until_value}")
         
         # Add BYDAY for weekly or specific weekdays
         if frequency_type == "weekly":
@@ -333,14 +335,25 @@ def build_recurrence_rule_for_entity(entity) -> Optional[str]:
                 elif key == "INTERVAL":
                     parsed["frequency_interval"] = int(value)
                 elif key == "UNTIL":
-                    # Parse UNTIL date (YYYYMMDD format)
-                    parsed["until_date"] = datetime.strptime(value, "%Y%m%d")
+                    # Parse UNTIL date (YYYYMMDD or YYYYMMDDTHHMMSSZ format)
+                    normalized_value = value.strip().split("T", 1)[0].split("Z", 1)[0]
+                    parsed["until_date"] = datetime.strptime(normalized_value, "%Y%m%d")
                 elif key == "BYDAY":
                     # Convert "MO,WE,FR" to [0, 2, 4]
                     day_codes = value.split(",")
                     parsed["byday"] = day_codes
                 elif key == "BYMONTHDAY":
-                    parsed["bymonthday"] = int(value)
+                    monthdays = [part.strip() for part in value.split(",") if part.strip()]
+                    if len(monthdays) == 1:
+                        try:
+                            parsed["bymonthday"] = int(monthdays[0])
+                        except ValueError:
+                            parsed["bymonthday"] = monthdays[0]
+                    else:
+                        try:
+                            parsed["bymonthday"] = [int(item) for item in monthdays]
+                        except ValueError:
+                            parsed["bymonthday"] = monthdays
                 elif key == "BYYEARDAY":
                     parsed["byyearday"] = int(value)
                 elif key == "BYWEEKNO":
@@ -611,7 +624,17 @@ def parse_rrule(rrule_str: str) -> Dict[str, Any]:
             elif key == "BYDAY":
                 parsed["byday"] = value.split(",")
             elif key == "BYMONTHDAY":
-                parsed["bymonthday"] = int(value)
+                monthdays = [part.strip() for part in value.split(",") if part.strip()]
+                if len(monthdays) == 1:
+                    try:
+                        parsed["bymonthday"] = int(monthdays[0])
+                    except ValueError:
+                        parsed["bymonthday"] = monthdays[0]
+                else:
+                    try:
+                        parsed["bymonthday"] = [int(item) for item in monthdays]
+                    except ValueError:
+                        parsed["bymonthday"] = monthdays
             elif key == "BYYEARDAY":
                 parsed["byyearday"] = int(value)
             elif key == "BYWEEKNO":

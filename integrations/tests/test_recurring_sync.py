@@ -29,6 +29,7 @@ from integrations.services import (
     _google_request_json_with_retry,
 )
 from integrations.models import EventSyncMap, GoogleCalendarConnection, GoogleCalendarWatch
+from integrations.tasks import sync_google_full_calendar_task
 from tracker.models import Task, TaskOccurrence, Habit
 from tracker.services.occurrence import ensure_future_occurrences
 from integrations.rrule_handler import RRuleHandler
@@ -59,6 +60,38 @@ class RecurringTaskSyncTests(TestCase):
             is_active=True,
         )
     
+    @patch('integrations.tasks.sync_google_status_to_app_occurrences', return_value=0)
+    @patch('integrations.tasks.sync_external_google_event_to_app', return_value={"synced": False})
+    @patch('integrations.tasks.sync_google_recurring_change', return_value={"synced": False})
+    @patch('integrations.tasks.upsert_mirror_events', return_value=1)
+    @patch('integrations.tasks.google_list_events', return_value={"items": [], "nextSyncToken": "sync_token_123"})
+    @patch('integrations.tasks._coerce_access_token_result', return_value=("access_token", ""))
+    @patch('integrations.tasks.ensure_valid_access_token', return_value=("access_token", ""))
+    def test_sync_google_full_calendar_task_updates_watch_sync_token(
+        self,
+        mock_token,
+        mock_coerce,
+        mock_list_events,
+        mock_upsert,
+        mock_recurring_change,
+        mock_external_sync,
+        mock_status_sync,
+    ):
+        watch = GoogleCalendarWatch.objects.create(
+            user=self.user,
+            calendar_id="primary",
+            channel_id="channel_123",
+            resource_id="resource_123",
+            sync_token=None,
+            is_active=True,
+        )
+
+        result = sync_google_full_calendar_task(str(self.user.user_id), "primary")
+
+        self.assertTrue(result["synced"])
+        watch.refresh_from_db()
+        self.assertEqual(watch.sync_token, "sync_token_123")
+
     @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')
     @patch('integrations.services.ensure_valid_access_token')
@@ -657,6 +690,30 @@ class RecurringTaskSyncTests(TestCase):
         self.assertFalse(result["created"])
         self.assertIn("no recurrence_rule", result["error"])
 
+    def test_sync_google_recurring_to_app_sets_duration_config_from_google_event(self):
+        google_event = {
+            "id": "google_recurring_duration",
+            "summary": "Recurring Duration",
+            "description": "Imported from Google",
+            "status": "confirmed",
+            "etag": "etag-duration",
+            "start": {"dateTime": "2026-06-05T09:00:00+00:00"},
+            "end": {"dateTime": "2026-06-05T10:30:00+00:00"},
+            "recurrence": ["RRULE:FREQ=DAILY;INTERVAL=1;UNTIL=20260607"],
+        }
+
+        result = sync_google_recurring_to_app(self.user, google_event, calendar_id="primary")
+
+        self.assertTrue(result["synced"])
+        parent = Task.objects.get(google_event_id="google_recurring_duration")
+        self.assertEqual(parent.duration_config, {"value": 90, "unit": "minutes"})
+
+    def test_parse_rrule_supports_multiple_monthly_days(self):
+        parsed = RRuleHandler.parse_rrule("FREQ=MONTHLY;INTERVAL=1;BYMONTHDAY=1,15;UNTIL=20261231")
+
+        self.assertEqual(parsed["frequency_type"], "monthly")
+        self.assertEqual(parsed["bymonthday"], [1, 15])
+
     @patch('integrations.services._google_request_json_with_retry')
     @patch('integrations.services._google_request_json')
     @patch('integrations.services.ensure_valid_access_token')
@@ -1099,15 +1156,49 @@ class HabitRecurringSyncTests(TestCase):
                 "summary": "All Day Conference",
                 "description": "All-day external event",
                 "start": {"date": "2026-06-08"},
-                "end": {"date": "2026-06-09"},
+                "end": {"date": "2026-06-10"},
             },
         )
 
         self.assertTrue(result["synced"])
         task = Task.objects.get(google_event_id="google_all_day_event")
         self.assertEqual(task.start_date, date(2026, 6, 8))
+        self.assertEqual(task.end_date, date(2026, 6, 9))
+        self.assertIsNone(task.end_time)
         occurrence = TaskOccurrence.objects.get(task=task)
         self.assertEqual(occurrence.scheduled_date, date(2026, 6, 8))
+
+    def test_sync_external_google_single_event_updates_title_from_google(self):
+        created = sync_external_google_event_to_app(
+            self.user,
+            {
+                "id": "google_external_title",
+                "etag": "etag_external_title",
+                "summary": "Original Title",
+                "description": "First description",
+                "start": {"dateTime": "2026-06-08T12:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-08T13:00:00Z", "timeZone": "UTC"},
+            },
+        )
+
+        self.assertTrue(created["synced"])
+
+        updated = sync_external_google_event_to_app(
+            self.user,
+            {
+                "id": "google_external_title",
+                "etag": "etag_external_title_2",
+                "summary": "Updated Title",
+                "description": "Updated description",
+                "start": {"dateTime": "2026-06-08T12:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-08T13:00:00Z", "timeZone": "UTC"},
+            },
+        )
+
+        self.assertTrue(updated["synced"])
+        task = Task.objects.get(google_event_id="google_external_title")
+        self.assertEqual(task.title, "Updated Title")
+        self.assertEqual(task.description, "Updated description")
 
     def test_sync_external_google_single_event_cancellation_marks_deleted(self):
         created = sync_external_google_event_to_app(

@@ -1032,6 +1032,12 @@ def _build_task_defaults_from_google_event(google_event: dict, rrule_str: str) -
     frequency_days = [day_map[code] for code in byday_codes if code in day_map]
     until_date = parsed_rrule.get("until_date")
 
+    duration_config = None
+    if start_dt and end_dt and end_dt > start_dt:
+        duration_minutes = int((end_dt - start_dt).total_seconds() // 60)
+        if duration_minutes > 0:
+            duration_config = {"unit": "minutes", "value": duration_minutes}
+
     return {
         "title": google_event.get("summary") or "Google Calendar Event",
         "description": google_event.get("description") or "",
@@ -1046,6 +1052,7 @@ def _build_task_defaults_from_google_event(google_event: dict, rrule_str: str) -
         "end_date": until_date.date() if until_date else (end_dt.date() if end_dt else None),
         "start_time": start_dt.time() if start_dt else None,
         "end_time": end_dt.time() if end_dt else None,
+        "duration_config": duration_config,
         "google_event_id": google_event.get("id"),
         "recurrence_rule": rrule_str,
         "external_google_id": True,
@@ -1306,6 +1313,19 @@ def sync_external_google_event_to_app(user, google_event: dict, calendar_id: str
             if parent or occurrence:
                 sync_google_notifications_to_app(user, google_event, parent=parent, occurrence=occurrence)
                 return {"synced": True, "reason": "reminders_updated"}
+
+        parent = None
+        if existing.local_parent_type == "habit":
+            from tracker.models import Habit
+
+            parent = Habit.objects.filter(id=existing.local_task_id, user=user).first() if existing.local_task_id else None
+        else:
+            parent = Task.objects.filter(id=existing.local_task_id, user=user).first() if existing.local_task_id else None
+        if parent is not None:
+            parent.title = google_event.get("summary") or parent.title
+            parent.description = google_event.get("description") or parent.description
+            parent.save(update_fields=["title", "description", "updated_at"])
+            return {"synced": True, "reason": "updated_from_google"}
         return {"synced": False, "reason": "already_synced"}
 
     if google_event.get("recurrence"):
@@ -1321,6 +1341,13 @@ def sync_external_google_event_to_app(user, google_event: dict, calendar_id: str
     if start_dt is None:
         return {"synced": False, "reason": "missing_start_datetime"}
 
+    all_day = bool((google_event.get("start") or {}).get("date"))
+    normalized_end_date = start_dt.date()
+    if all_day and end_dt:
+        normalized_end_date = end_dt.date() - timedelta(days=1)
+    elif end_dt:
+        normalized_end_date = end_dt.date()
+
     reminder_offsets = _google_reminders_to_app_offsets(google_event)
     task = Task.objects.create(
         user=user,
@@ -1330,9 +1357,9 @@ def sync_external_google_event_to_app(user, google_event: dict, calendar_id: str
         status="pending",
         frequency_type="once",
         start_date=start_dt.date(),
-        end_date=start_dt.date(),
+        end_date=normalized_end_date,
         start_time=start_dt.time(),
-        end_time=end_dt.time() if end_dt else None,
+        end_time=end_dt.time() if end_dt and not all_day else None,
         duration_config={"unit": "minutes", "value": int(duration.total_seconds() // 60)} if duration else None,
         google_event_id=google_event_id,
         recurrence_rule=None,

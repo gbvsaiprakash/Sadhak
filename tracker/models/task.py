@@ -68,7 +68,6 @@ class Task(UUIDTimeStampedModel):
 
     def build_recurrence_rule(self):
         from integrations.rrule_handler import build_recurrence_rule_for_entity
-
         return build_recurrence_rule_for_entity(self)
     
     def get_normalized_reminders(self):
