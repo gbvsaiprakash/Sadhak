@@ -1,5 +1,5 @@
 import os
-
+from sadhak_base.notifications import (_notify_google_sync_issue)
 from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from django.core.exceptions import ValidationError
@@ -26,6 +26,7 @@ from integrations.services import (
     fetch_google_user_info,
     ensure_watch,
     compute_expiry,
+    resolve_google_redirect_uri,
 )
 from user_management.models import User
 from user_management.views import AuthenticatedAPIView
@@ -71,7 +72,7 @@ class GoogleOAuthStartAPIView(APIView):
         s = GoogleOAuthStartSerializer(data=request.query_params)
         s.is_valid(raise_exception=True)
         mode = s.validated_data["mode"]
-        redirect_uri = s.validated_data.get("redirect_uri") or os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+        redirect_uri = resolve_google_redirect_uri(s.validated_data.get("redirect_uri"))
         if not redirect_uri:
             return Response(
                 {"message": "GOOGLE_OAUTH_REDIRECT_URI is required for Google OAuth"},
@@ -81,7 +82,7 @@ class GoogleOAuthStartAPIView(APIView):
         return Response({"auth_url": auth_url, "state": state}, status=status.HTTP_200_OK)
 
 
-class GoogleOAuthCallbackAPIView(APIView):
+class GoogleOAuthCallbackAPIView(AuthenticatedAPIView):
     permission_classes = []
 
     def get(self, request):
@@ -96,17 +97,24 @@ class GoogleOAuthCallbackAPIView(APIView):
 
         if isinstance(state_data, dict):
             mode = state_data.get("mode")
-            redirect_uri = state_data.get("redirect_uri") or os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+            redirect_uri = state_data.get("redirect_uri") or resolve_google_redirect_uri()
+            print(f"Using redirect URI from state: {redirect_uri}")
         else:
             mode = state_data
-            redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+            redirect_uri = resolve_google_redirect_uri()
 
         if not mode:
             return Response({"message": "Invalid OAuth state payload"}, status=status.HTTP_400_BAD_REQUEST)
         if not redirect_uri:
             return Response({"message": "Missing Google OAuth redirect URI"}, status=status.HTTP_400_BAD_REQUEST)
 
-        token_data = exchange_code_for_token(code, redirect_uri)
+        if mode == "calendar" and (not request.user or request.user.is_anonymous):
+            return Response({"message": "Authenticated user required"}, status=status.HTTP_401_UNAUTHORIZED)
+        try:
+            token_data = exchange_code_for_token(code, redirect_uri)
+        except ValueError as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
         access_token = token_data.get("access_token")
         if not access_token:
             return Response({"message": "Failed to get access token from Google"}, status=status.HTTP_400_BAD_REQUEST)
@@ -173,7 +181,9 @@ class GoogleOAuthCallbackAPIView(APIView):
                 },
             )
             try:
-                ensure_watch(user, calendar_id="primary")
+                result = ensure_watch(user, calendar_id="primary")
+                if not result.get("synced") and result.get("reason") in {"access_token_error", "not_connected"}:
+                    _notify_google_sync_issue(user, result.get("reason", "unknown"), calendar_id="primary")
             except Exception:
                 # Watch creation can fail if webhook URL is not configured;
                 # connection should still succeed.
@@ -243,6 +253,8 @@ class GoogleCalendarFullSyncAPIView(AuthenticatedAPIView):
         watch = request.user.google_calendar_watches.filter(calendar_id=calendar_id, is_active=True).first()
         if not watch:
             watch = ensure_watch(request.user, calendar_id=calendar_id)
+            if not watch.get("synced") and watch.get("reason") in {"access_token_error", "not_connected"}:
+                _notify_google_sync_issue(request.user, watch.get("reason", "unknown"), calendar_id=calendar_id)
         sync_google_full_calendar_task.delay(str(request.user.user_id), calendar_id)
         return Response(
             {

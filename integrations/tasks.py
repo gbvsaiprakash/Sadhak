@@ -20,36 +20,9 @@ from integrations.services import (
 from integrations.models import GoogleCalendarConnection, GoogleCalendarWatch
 from tracker.models import Task, Habit, TaskOccurrence
 from tracker.services.occurrence import sync_occurrence_reminders_for_parent
+from sadhak_base.notifications import (_notify_google_sync_issue)
 
 User = get_user_model()
-
-
-def _notify_google_sync_issue(user, reason: str, parent=None, occurrence=None, calendar_id: str = "primary"):
-    from sadhak_base.notifications import send_notification
-
-    payload = {
-        "error_code": reason,
-        "calendar_id": calendar_id,
-    }
-    if parent is not None:
-        payload["parent_id"] = str(parent.id)
-        payload["parent_type"] = "habit" if getattr(parent, "is_habit", False) else "task"
-    if occurrence is not None:
-        payload["occurrence_id"] = str(occurrence.id)
-
-    for mode in ("in-app", "push"):
-        try:
-            send_notification(
-                user,
-                mode,
-                "Google Calendar sync paused",
-                "google_sync",
-                "We couldn't finish syncing with Google Calendar.",
-                payload,
-            )
-        except Exception:
-            continue
-
 
 @shared_task
 def sync_recurring_parent_to_google_task(parent_type: str, parent_id: str, user_id: str, calendar_id: str = "primary"):
@@ -59,7 +32,7 @@ def sync_recurring_parent_to_google_task(parent_type: str, parent_id: str, user_
     if not user or not parent:
         return {"synced": False, "reason": "missing_parent_or_user"}
     result = create_recurring_google_event(user, parent, calendar_id=calendar_id)
-    if not result.get("created") and result.get("error"):
+    if not result.get("created") and result.get("error") :
         _notify_google_sync_issue(user, result.get("error", "unknown"), parent=parent, calendar_id=calendar_id)
     return result
 
@@ -116,6 +89,7 @@ def sync_parent_action_to_google_task(
 
 @shared_task
 def sync_parent_reminders_to_google_task(parent_type: str, parent_id: str, user_id: str, calendar_id: str = "primary"):
+    from integrations.services import _disconnect_google_calendar
     parent_model = Task if parent_type == "task" else Habit
     user = User.objects.filter(pk=user_id).first()
     parent = parent_model.objects.filter(id=parent_id).first()
@@ -123,6 +97,7 @@ def sync_parent_reminders_to_google_task(parent_type: str, parent_id: str, user_
         return {"synced": False, "reason": "missing_parent_or_user"}
     result = sync_parent_reminders_to_google(user, parent, calendar_id=calendar_id)
     if not result.get("synced") and result.get("reason") in {"access_token_error", "not_connected"}:
+        _disconnect_google_calendar(user)
         _notify_google_sync_issue(user, result.get("reason", "unknown"), parent=parent, calendar_id=calendar_id)
     return result
 
@@ -163,6 +138,7 @@ def sync_google_watch_task(watch_id: str):
 
 @shared_task
 def sync_google_full_calendar_task(user_id: str, calendar_id: str = "primary"):
+    from integrations.services import _disconnect_google_calendar
     user = User.objects.filter(pk=user_id).first()
     if not user:
         return {"synced": False, "reason": "missing_user"}
@@ -171,6 +147,7 @@ def sync_google_full_calendar_task(user_id: str, calendar_id: str = "primary"):
         return {"synced": False, "reason": "not_connected"}
     access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
+        _disconnect_google_calendar(user)
         _notify_google_sync_issue(user, error, calendar_id=calendar_id)
         return {"synced": False, "reason": error}
     data = google_list_events(access_token, calendar_id=calendar_id, user=user)

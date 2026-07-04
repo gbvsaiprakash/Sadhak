@@ -135,3 +135,29 @@ def _send_push(user, title: str, body: str, data: dict | None = None):
         "success_count": resp.success_count,
         "failure_count": resp.failure_count,
     }
+
+def _notify_google_sync_issue(user, reason: str, parent=None, occurrence=None, calendar_id: str = "primary"):
+
+    payload = {
+        "error_code": reason,
+        "calendar_id": calendar_id,
+    }
+    if parent is not None:
+        payload["parent_id"] = str(parent.id)
+        payload["parent_type"] = "habit" if getattr(parent, "is_habit", False) else "task"
+    if occurrence is not None:
+        payload["occurrence_id"] = str(occurrence.id)
+
+    for mode in ("in-app", "push"):
+        try:
+            send_notification(
+                user,
+                mode,
+                "Google Calendar sync paused",
+                "google_sync",
+                "We couldn't finish syncing with Google Calendar.",
+                payload,
+            )
+        except Exception:
+            continue
+

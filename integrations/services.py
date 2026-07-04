@@ -14,6 +14,9 @@ from django.utils import timezone as dj_timezone
 from integrations.crypto import encrypt_token, decrypt_token
 from integrations.models import GoogleCalendarConnection, GoogleCalendarMirrorEvent, GoogleCalendarWatch, EventSyncMap
 from integrations.rrule_handler import RRuleHandler, build_recurrence_rule_for_entity
+from sadhak_base.notifications import (
+    _notify_google_sync_issue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,23 +31,31 @@ GOOGLE_CALENDAR_WATCH_URL = "https://www.googleapis.com/calendar/v3/calendars/{c
 def _env(name: str, default: str | None = None) -> str | None:
     return os.getenv(name, default)
 
+
+def resolve_google_redirect_uri(preferred_redirect_uri: str | None = None) -> str:
+    if preferred_redirect_uri:
+        return preferred_redirect_uri
+    configured_redirect_uri = _env("GOOGLE_OAUTH_REDIRECT_URI", "") or ""
+    return configured_redirect_uri
+
 class GoogleTokenExpiredException(Exception):
     pass
 
 def build_google_oauth_url(mode: str, redirect_uri: str) -> tuple[str, str]:
+    resolved_redirect_uri = resolve_google_redirect_uri(redirect_uri)
     client_id = _env("GOOGLE_OAUTH_CLIENT_ID", "")
     # state = secrets.token_urlsafe(32)
     state = signing.dumps(
         {
             "mode": mode,
-            "redirect_uri": redirect_uri,
+            "redirect_uri": resolved_redirect_uri,
             "nonce": secrets.token_urlsafe(16),
         },
         salt="google-oauth-state",
     )
     cache.set(
         f"google_oauth_state:{state}",
-        {"mode": mode, "redirect_uri": redirect_uri},
+        {"mode": mode, "redirect_uri": resolved_redirect_uri},
         timeout=900,
     )
 
@@ -59,7 +70,7 @@ def build_google_oauth_url(mode: str, redirect_uri: str) -> tuple[str, str]:
 
     params = {
         "client_id": client_id,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": resolved_redirect_uri,
         "response_type": "code",
         "scope": scope,
         "state": state,
@@ -108,8 +119,13 @@ def exchange_code_for_token(code: str, redirect_uri: str) -> dict:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.loads(r.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        logger.error("Google token exchange failed: %s", error_body)
+        raise ValueError(f"Google token exchange failed: {error_body}") from e
 
 
 def refresh_access_token(refresh_token: str) -> dict:
@@ -200,14 +216,12 @@ def _google_request_json_with_retry(
     transient_statuses = {429, 500, 502, 503, 504}
     last_error = None
     for attempt in range(retries):
-        print(url)
         req = urllib.request.Request(
             url,
             data=body,
             method=method,
             headers=headers,
         )
-        print(req.get_full_url)
         try:
             with urllib.request.urlopen(req, timeout=25) as r:
                 raw = r.read().decode() or "{}"
@@ -311,10 +325,11 @@ def google_list_event_instances(
 def ensure_watch(user, calendar_id: str = "primary") -> GoogleCalendarWatch:
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
     if not connection:
-        raise ValueError("Google Calendar not connected")
+        return {"synced": False, "reason": "not_connected"}
     access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
-        raise ValueError(f"Access token error: {error}")
+        _disconnect_google_calendar(user)
+        return {"synced": False, "reason": f"access_token_error: {error}"}
     channel_id = secrets.token_urlsafe(24)
     webhook_url = _env("GOOGLE_CALENDAR_WEBHOOK_URL", "")
     if not webhook_url:
@@ -512,6 +527,7 @@ def sync_parent_reminders_to_google(user, parent, calendar_id: str = "primary") 
 
     access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
+        _disconnect_google_calendar(user)
         return {"synced": False, "reason": f"access_token_error: {error}"}
     encoded_calendar = urllib.parse.quote(calendar_id, safe="")
     encoded_event = urllib.parse.quote(parent.google_event_id, safe="")
@@ -542,6 +558,8 @@ def delete_google_event_from_calendar(user, google_event_id: str, calendar_id: s
 
     access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
+        _disconnect_google_calendar(user)
+        _notify_google_sync_issue(user, error, calendar_id=calendar_id)
         return {"deleted": False, "reason": f"access_token_error: {error}"}
 
     encoded_calendar = urllib.parse.quote(calendar_id, safe="")
@@ -825,6 +843,8 @@ def pull_google_delta_for_watch(watch: GoogleCalendarWatch) -> dict:
         raise ValueError("Google Calendar connection not found")
     access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
+        GoogleCalendarConnection.objects.filter(user=watch.user, is_active=True).update(is_active=False)
+        _notify_google_sync_issue(watch.user, error, calendar_id=watch.calendar_id)
         return {"synced": False, "reason": f"access_token_error: {error}"}
     data = google_list_events(access_token, calendar_id=watch.calendar_id, sync_token=watch.sync_token, user=watch.user)
     items = data.get("items", [])
@@ -1404,6 +1424,8 @@ def handle_recurring_occurrence_change(user, occurrence, action: str, calendar_i
 
     access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
+        _disconnect_google_calendar(user)
+        _notify_google_sync_issue(user, error, calendar_id=calendar_id)
         return {"pushed": False, "reason": f"access_token_error: {error}"}
     instance = _find_google_recurring_instance(access_token, calendar_id, parent, occurrence)
     if not instance:
@@ -1533,12 +1555,15 @@ def create_recurring_google_event(user, task, calendar_id: str = "primary") -> d
     
     connection = GoogleCalendarConnection.objects.filter(user=user, is_active=True).first()
     if not connection:
-        return {"created": False, "error": "Google Calendar not connected"}
+        _notify_google_sync_issue(user, "Google Calendar not connected", calendar_id=calendar_id)
+        return {"created": False, "error": ""}
     
     try:
         access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
         if error:
-            return {"created": False, "error": f"Access token error: {error}"}
+            _disconnect_google_calendar(user)
+            _notify_google_sync_issue(user, error, calendar_id=calendar_id)
+            return {"created": False, "error": ""}
         was_existing_event = bool(task.google_event_id)
         
         # Prepare event payload with recurrence
@@ -1660,7 +1685,9 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
         return {"pushed": False, "reason": "not_connected"}
     access_token, error = _coerce_access_token_result(ensure_valid_access_token(connection))
     if error:
-        return {"pushed": False, "reason": f"access_token_error: {error}"}
+        _disconnect_google_calendar(user)
+        _notify_google_sync_issue(user, error, calendar_id=calendar_id)
+        return {"pushed": False, "reason": f""}
     title = (occurrence.task.title if occurrence.task_id else occurrence.habit.title) if (occurrence.task_id or occurrence.habit_id) else "Event"
     start_iso, tz = _google_date_time_payload(occurrence.scheduled_date, occurrence.scheduled_time)
     end_iso, _ = _google_date_time_payload(occurrence.scheduled_date, occurrence.schedule_end_time or occurrence.scheduled_time)
@@ -1741,3 +1768,12 @@ def push_local_occurrence_change(user, occurrence, action: str, calendar_id: str
         },
     )
     return {"pushed": True, "action": "create", "google_event_id": res.get("id")}
+
+def _disconnect_google_calendar(user):
+    """
+    Disconnect the user's Google Calendar integration.
+    Marks the connection as inactive and disables any active watches.
+    """
+    GoogleCalendarConnection.objects.filter(user=user).update(is_active=False)
+    user.google_calendar_watches.update(is_active=False)
+    logger.info(f"Disconnected Google Calendar for user {user.username}")
